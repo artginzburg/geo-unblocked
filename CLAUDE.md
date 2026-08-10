@@ -81,6 +81,24 @@ carry it.
 `grouping` is likewise empty everywhere. `composer` is the one that mattered:
 17 of the 241 tracks have one, and it was being dropped until noticed.
 
+## Sources, in practice
+
+**JioSaavn's "320" is a tier label, not a promise.** Asking for format 320
+explicitly still returned a 98kbps file for one track while another from the
+same album came back at an honest 324. Check what actually arrived.
+
+**JioSaavn search is useless for Western catalogue.** "Gorillaz White Light"
+returns nothing, "Fall Out Boy 27" returns karaoke, "2 Ton Truck" returns Hindi
+songs containing "To". It cannot be used to survey a library — absence of a hit
+there means the search failed, not that the record is missing. The album route
+(`data/album_sources.json`) is the only reliable way in.
+
+**Verify the artist, every time.** Three separate near-misses in this project
+came from matching a title and a duration and nothing else: a different artist's
+"Лодка" with a convincing Apple cover, a "Nuvole Bianche" from a baby-sleep
+compilation two seconds off, and an "American Funeral" seven seconds off by an
+unrelated band. Common titles and common lengths are not evidence.
+
 ## The export is a backup
 
 `data/Geoblocked.txt` is not just an input list. It holds `Plays`, `Last Played`,
