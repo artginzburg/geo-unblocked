@@ -29,9 +29,22 @@ DUR_WIDE = 12
 WIDE_PENALTY = 45
 
 
+# The Apple export romanises Cyrillic artists ("Aleksey Vishnya") while every
+# source spells them in Cyrillic. Without folding both to one alphabet, a correct
+# Russian match scores as if the artist were absent and never clears the bar.
+CYR = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
 def norm(s):
     s = unicodedata.normalize("NFKD", s.lower())
-    return re.sub(r"[^a-z0-9а-яё ]+", " ", s).strip()
+    s = "".join(CYR.get(c, c) for c in s)
+    return re.sub(r"[^a-z0-9 ]+", " ", s).strip()
 
 
 def tokens(s):
@@ -154,6 +167,34 @@ def fetch(url, out_base, attempts=3):
             print(f"      retry {i+1}/{attempts-1} после ошибки: {str(last)[:80]}", flush=True)
             time.sleep(5 * (i + 1))
     raise last
+
+
+def effective_duration(path):
+    """Length of the actual audio, ignoring silence padded onto either end.
+
+    Sources routinely differ from Apple's length by a few seconds purely because
+    of leading or trailing silence -- a video edit fades out into quiet, a rip
+    keeps the run-off. Measuring the sound itself tells a re-mastered copy of the
+    same recording apart from a genuinely different cut, which the container
+    duration cannot do."""
+    try:
+        dur = float(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=60).stdout.strip())
+    except Exception:
+        return None
+    try:
+        err = subprocess.run(
+            ["ffmpeg", "-i", str(path), "-af", "silencedetect=noise=-45dB:d=0.5",
+             "-f", "null", "-"], capture_output=True, text=True, timeout=180).stderr
+    except Exception:
+        return dur
+    ends = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", err)]
+    starts = [float(x) for x in re.findall(r"silence_start: ([\d.]+)", err)]
+    lead = ends[0] if ends and ends[0] < dur / 2 else 0.0
+    tail = dur - starts[-1] if starts and starts[-1] > dur / 2 else 0.0
+    return dur - lead - tail
 
 
 def itunes(term, entity):
@@ -736,6 +777,31 @@ def main():
         sc, e, prov = hit
         url = e.get("url") or e.get("webpage_url")
         print(f"      -> [{prov} {sc:.0f}] {e.get('uploader')} | {e.get('title')} | {e.get('duration')}s")
+        # A candidate rejected only for being a few seconds long may simply carry
+        # padded silence. That is cheap to settle with evidence: fetch it and
+        # measure the sound itself. Anything still off is a different cut.
+        prefetched = None
+        off = abs((e.get("duration") or 0) - want)
+        # Run this for every wide candidate headed for review, not only ones that
+        # nearly cleared the bar: the whole point is that the score cannot decide
+        # these, so gating the evidence on the score is circular.
+        if not a.dry_run and sc < a.min_score and DUR_TOLERANCE < off <= DUR_WIDE:
+            try:
+                cand = fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
+                eff = effective_duration(cand)
+                if eff and abs(eff - want) <= DUR_TOLERANCE:
+                    # The real gap is now known, so rescore on it rather than
+                    # patching the penalty back off an estimate.
+                    sc = score({**e, "duration": eff}, row["Name"], row["Artist"], want)
+                    print(f"      тишина по краям: чистого звука {eff:.0f}s "
+                          f"(Δ{eff - want:+.0f}s) — принято, score {sc:.0f}")
+                    prefetched = cand
+                else:
+                    print(f"      чистого звука {eff:.0f}s (Δ{eff - want:+.0f}s) — другой монтаж")
+                    cand.unlink(missing_ok=True)
+            except Exception as ex:
+                print(f"      проверка тишины не удалась: {str(ex)[:60]}")
+
         # Below this, the match is a guess -- a live cut, a re-upload, a lookalike.
         # Park it for human review instead of quietly polluting the library.
         if sc < a.min_score:
@@ -749,8 +815,7 @@ def main():
             save_state(st); continue
 
         try:
-            base = DEST / safe(f"{row['Artist']} - {row['Name']}")
-            f = fetch(url, str(base))
+            f = prefetched or fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
             if not f:
                 raise RuntimeError("no output file")
             art_src = tag(f, row,
