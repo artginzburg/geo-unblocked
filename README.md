@@ -205,6 +205,8 @@ python3 geo-unblock.py --repair                        # patch already-imported 
 | `--no-soundcloud` | YouTube only |
 | `--report` | counts, sources, timings, and anything left in review |
 | `--repair` | fix artwork, history and comments on tracks already imported |
+| `--dedupe` | list library rows that are the same recording twice over |
+| `--dedupe --apply` | merge their history onto the oldest row and delete the rest |
 
 The playlists the tool creates are named from `$GEO_UNBLOCKED_NAME`, default
 `Geo-Unblocked`. Set it if that clashes with something you already have.
@@ -219,6 +221,27 @@ touches library metadata. It is safe to run repeatedly — every operation it
 performs converges rather than accumulating.
 
 Progress lives in `data/state.json` and every run resumes from it.
+
+## Duplicates Music makes on its own
+
+Separate from anything this tool does, Music sometimes re-downloads a
+subscription track it already has — writing `Track 1.movpkg` beside the
+original — and registers each download as its own library row. The rows look
+identical and each counts its own plays, so a song listened to 34 times can show
+25, 8 and 1 across three entries.
+
+```bash
+python3 geo-unblock.py --dedupe           # list them, change nothing
+python3 geo-unblock.py --dedupe --apply   # merge and collapse
+```
+
+Rows are grouped on title, artist, album, **track number and duration** — the
+first three alone are not enough, because Apple relabels entries and two
+different songs can end up sharing all of them. The oldest row survives, since
+it holds the real `date added`; the others' play and skip counts are added to
+it, not maxed, and any plain playlist that would lose the song gets the survivor
+put back. Dead geoblocked entries beside their replacements are left alone —
+that pair is what the originals playlist is for.
 
 ## Playlists
 

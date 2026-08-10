@@ -62,6 +62,33 @@ instead of what the library *holds*.
   match was not re-added afterwards. Inside the script it is safe, because
   delete and add are adjacent. As a standalone cleanup it is not.
 
+## Music duplicates its own subscription tracks, unprompted
+
+Not everything wrong with the library is this tool's doing, and assuming it is
+wastes a session. Music sometimes re-downloads a subscription track it already
+has, writing `10 Psycho Killer ( LP Version ) 1.movpkg`, then ` 2.movpkg`, and
+creating a **separate library row per download** — same name, artist, album,
+duration and track number, each accumulating its own play count. One song was
+found three times over, with 25, 8 and 1 plays: 34 real listens split across
+rows that all looked like the same entry.
+
+Telling it apart from our own work is one property: our imports are `.m4a` with
+`geo-unblocked ·` in the comment, and land as `uploaded`. Music's re-downloads
+are `.movpkg`, comment empty, `subscription`.
+
+- **Find them on disk, not in the library.** `find ~/Music/Music/Media.localized
+  -name "* [0-9].movpkg"` lists every re-download directly. The library-side
+  equivalent — grouping on name+artist+album — needs duration and track number
+  to separate real duplicates from different songs that share a title, and see
+  the index warning below before joining that data across calls.
+- **Merging is a sum, not a max.** The usual raise-only rule exists because
+  `--repair` reruns; here each row counted different real listens, so the
+  keeper gets the total. Keep the oldest row: it holds the true `date added`.
+- **Check playlist membership before deleting.** Smart playlists re-evaluate and
+  need nothing, but a plain playlist loses the song when its only member row is
+  deleted — re-add the keeper first. Two of the three rows above were in a
+  synced Shazam playlist that the keeper was absent from.
+
 ## AppleScript traps
 
 - **`date added` is read-only.** `set date added` returns `Unknown object type`
@@ -79,7 +106,14 @@ instead of what the library *holds*.
 - **Writable:** `played count`, `played date`, `skipped count`, `favorited`,
   `rating`, `comment`, `composer`, artwork via `set data of artwork 1`.
   **Not writable:** `date added`.
-- **Copying a date object between tracks fails**; a constructed date works.
+- **Copying a date object between tracks fails in one expression.** `set played
+  date of a to played date of b` raises -10006; `set d to played date of b` and
+  then `set played date of a to d` succeeds. The property is writable — it is
+  the nested specifier that Music refuses.
+- **`year`, `month`, `day` are Music's own track properties**, so `year of d`
+  inside `tell application "Music"` asks Music for a track's year and fails on a
+  date object. Pull date components apart in a handler defined outside the tell
+  block and call it with `my`.
 - **`before` is a reserved word** (`insert … before`). `set before to …` does not
   compile — and the caller returned `"0"` on any non-zero exit, so a script that
   never ran once looked exactly like "there was nothing to do". Parking was dead
@@ -91,6 +125,15 @@ instead of what the library *holds*.
   10319 when enumerated and resolves to a different id when looked up, so
   Music's own index disagrees with itself. **Never trust a `whose` filter as a
   complete set** — bulk-read the property and walk the matching indices.
+- **Track indices are not stable between calls.** `track 5676 of library
+  playlist 1` is a different song in the next `osascript` invocation — the
+  library reorders on its own, without the library changing. So *correlating
+  data across calls by index silently fabricates rows*: a dump of names joined
+  to a later dump of durations produced a dozen convincing "same title,
+  different song" findings, every one an artefact of the join. Read every
+  property you intend to compare **in one call**, or key on `persistent ID`.
+  Within a single script indices are consistent, which is why `build_index`
+  works.
 - **A list of specifiers cannot be bulk-read.** `get name of (every track whose
   …)` fails; only `get name of every track of <container>` works. So filtering
   and bulk-reading cannot be combined — read the whole container, then index.

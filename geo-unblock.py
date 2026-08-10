@@ -1455,6 +1455,169 @@ def thumb_and_title(url):
     return thumb, title
 
 
+def dedupe(apply=False):
+    """Collapse library rows that are the same recording listed more than once.
+
+    Not this tool's doing, and worth saying so plainly: Music re-downloads a
+    subscription track it already has, writes `Track 1.movpkg` beside the
+    original, and registers it as a *separate* row that then accumulates its own
+    play count. One song was here three times over, carrying 25, 8 and 1 plays
+    of the same 34 real listens.
+
+    Everything is read in a single AppleScript call, because `track i of library
+    playlist 1` addresses a different song in the next invocation -- joining two
+    dumps by index invents rows that were never there. Only `persistent ID`
+    survives between calls, so the second pass is keyed on that.
+
+    The grouping deliberately includes duration and track number. Title, artist
+    and album alone are not enough: Apple relabels entries, and two genuinely
+    different songs can end up sharing all three."""
+    scr = '''tell application "Music"
+  set src to library playlist 1
+  set S to (ASCII character 1)
+  set B to (ASCII character 2)
+  set AppleScript's text item delimiters to S
+  set r to ((get name of every track of src) as text) & B
+  set r to r & ((get artist of every track of src) as text) & B
+  set r to r & ((get album of every track of src) as text) & B
+  set r to r & ((get cloud status of every track of src) as text) & B
+  set r to r & ((get persistent ID of every track of src) as text) & B
+  set r to r & ((get track number of every track of src) as text) & B
+  set r to r & ((get time of every track of src) as text) & B
+  set r to r & ((get played count of every track of src) as text)
+  return r
+end tell'''
+    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=300)
+    if r.returncode:
+        print("не смог прочитать библиотеку:", r.stderr.strip()); return
+    cols = [b.split("\x01") for b in r.stdout.rstrip("\n").split("\x02")]
+    if len({len(c) for c in cols}) != 1:
+        print("столбцы разошлись — читать нельзя:", [len(c) for c in cols]); return
+    keys = ["name", "artist", "album", "status", "pid", "tn", "time", "plays"]
+    lib = [dict(zip(keys, [c[i] for c in cols])) for i in range(len(cols[0]))]
+
+    def secs(t):
+        p = [x for x in t.split(":") if x.isdigit()]
+        return sum(int(v) * 60 ** i for i, v in enumerate(reversed(p))) if p else -1
+
+    groups = {}
+    for t in lib:
+        k = (norm(t["name"]), norm(t["artist"]), norm(t["album"]), t["tn"], secs(t["time"]))
+        groups.setdefault(k, []).append(t)
+    # A dead original beside its replacement is the expected shape of this
+    # project's work, not a duplicate -- parking already handles those.
+    dups = [v for k, v in groups.items()
+            if len(v) > 1 and k[4] >= 0
+            and not any(x["status"] == "no longer available" for x in v)]
+    if not dups:
+        print("дублей не найдено"); return
+    print(f"групп-дублей: {len(dups)}, лишних записей: {sum(len(v) - 1 for v in dups)}")
+
+    # Second pass keyed on persistent ID, never on index. `date added` decides
+    # which row survives: it is the one field no re-import can restore.
+    pids = [x["pid"] for v in dups for x in v]
+    lst = ", ".join(f'"{p}"' for p in pids)
+    scr2 = f'''
+on dt(d)
+  try
+    return ((year of d) as text) & "." & ((month of d as integer) as text) & "." & ¬
+           ((day of d) as text) & "." & ((hours of d) as text) & "." & ((minutes of d) as text)
+  on error
+    return ""
+  end try
+end dt
+
+tell application "Music"
+  set o to {{}}
+  repeat with p in {{{lst}}}
+    set t to (first track of library playlist 1 whose persistent ID is (p as text))
+    set pls to {{}}
+    repeat with pl in (every user playlist)
+      try
+        if (smart of pl) is false and (special kind of pl) is none then
+          if (count of (every track of pl whose persistent ID is (p as text))) > 0 then
+            set end of pls to (name of pl)
+          end if
+        end if
+      end try
+    end repeat
+    set AppleScript's text item delimiters to "|"
+    set plt to pls as text
+    set AppleScript's text item delimiters to tab
+    set end of o to ((p as text) & tab & my dt(date added of t) & tab & my dt(played date of t) & tab & ¬
+      ((skipped count of t) as text) & tab & ((favorited of t) as text) & tab & plt)
+  end repeat
+  set AppleScript's text item delimiters to linefeed
+  return o as text
+end tell'''
+    r2 = subprocess.run(["osascript", "-e", scr2], capture_output=True, text=True, timeout=600)
+    if r2.returncode:
+        print("не смог прочитать подробности:", r2.stderr.strip()); return
+    det = {}
+    for line in r2.stdout.split("\n"):
+        p = line.split("\t")
+        if len(p) >= 6:
+            det[p[0]] = {"added": p[1], "played": p[2], "skips": p[3],
+                         "fav": p[4] == "true", "playlists": [x for x in p[5].split("|") if x]}
+
+    def when(s):
+        try:
+            return [int(x) for x in s.split(".")]
+        except Exception:
+            return [9999]
+
+    plan = []
+    for v in dups:
+        v.sort(key=lambda x: when(det.get(x["pid"], {}).get("added", "")))
+        keep, drop = v[0], v[1:]
+        d0 = det.get(keep["pid"], {})
+        # A sum, not a max. The raise-only rule elsewhere exists because
+        # `--repair` reruns; here every row counted listens the others did not.
+        plays = sum(int(x["plays"]) for x in v)
+        skips = sum(int(det.get(x["pid"], {}).get("skips") or 0) for x in v)
+        last = max((det.get(x["pid"], {}).get("played") or "" for x in v), key=when)
+        fav = any(det.get(x["pid"], {}).get("fav") for x in v)
+        # Smart playlists re-evaluate; a plain one simply loses the song.
+        orphaned = sorted({p for x in drop for p in det.get(x["pid"], {}).get("playlists", [])}
+                          - set(d0.get("playlists", [])))
+        plan.append((keep, drop, plays, skips, last, fav, orphaned))
+        print(f"\n{keep['artist']} — {keep['name']} [{keep['time']}]")
+        print(f"    оставляю: добавлен {d0.get('added','?')}, {keep['plays']} просл.")
+        for x in drop:
+            print(f"    удаляю:   добавлен {det.get(x['pid'],{}).get('added','?')}, {x['plays']} просл.")
+        print(f"    итог: {plays} просл., {skips} проп." + (f", вернуть в: {', '.join(orphaned)}" if orphaned else ""))
+
+    if not apply:
+        print("\nэто разбор без изменений. Чтобы применить: --dedupe --apply")
+        return
+
+    for keep, drop, plays, skips, last, fav, orphaned in plan:
+        adds = "\n".join(f'  duplicate k to user playlist "{p}"' for p in orphaned)
+        dels = "\n".join(
+            f'  delete (first track of library playlist 1 whose persistent ID is "{x["pid"]}")'
+            for x in drop)
+        # `set played date of a to played date of b` raises -10006; the date has
+        # to be bound to a variable first. Same shape as every other nested
+        # specifier Music refuses.
+        pd = (f'  set d to played date of (first track of library playlist 1 '
+              f'whose persistent ID is "{drop[0]["pid"]}")\n'
+              f'  set played date of k to d\n') if last and last != det.get(keep["pid"], {}).get("played") else ""
+        scr3 = f'''tell application "Music"
+  set k to (first track of library playlist 1 whose persistent ID is "{keep['pid']}")
+  set played count of k to {plays}
+  set skipped count of k to {skips}
+  set favorited of k to {"true" if fav else "false"}
+{pd}{adds}
+{dels}
+  return (count of (every track of library playlist 1 whose persistent ID is "{keep['pid']}"))
+end tell'''
+        r3 = subprocess.run(["osascript", "-e", scr3], capture_output=True, text=True, timeout=300)
+        if r3.returncode:
+            print(f"ОШИБКА на {keep['artist']} — {keep['name']}: {r3.stderr.strip()}")
+        else:
+            print(f"готово: {keep['artist']} — {keep['name']} ({plays} просл., осталось записей {r3.stdout.strip()})")
+
+
 def repair(rows, state):
     """Patch already-imported tracks in place: artwork, history, comment.
 
@@ -1677,6 +1840,10 @@ def main():
                     help="print a summary of the run so far and exit")
     ap.add_argument("--repair", action="store_true",
                     help="patch already-imported tracks in place instead of fetching")
+    ap.add_argument("--dedupe", action="store_true",
+                    help="find library rows that are the same recording twice over")
+    ap.add_argument("--apply", action="store_true",
+                    help="with --dedupe: merge the history and delete the extra rows")
     a = ap.parse_args()
 
     # YouTube first: Topic channels carry label-delivered audio. SoundCloud next,
@@ -1686,6 +1853,11 @@ def main():
     DEST.mkdir(parents=True, exist_ok=True)
     ensure_playlists()
     st = load_state()
+    # Reads the library, not the index -- it is about Music's own bookkeeping,
+    # so it must run before anything insists a track list exists.
+    if a.dedupe:
+        dedupe(a.apply)
+        return
     if a.refresh_index or not LIST.exists():
         why = "по запросу" if a.refresh_index else "списка ещё нет"
         print(f"читаю треки из Музыки ({why})…", flush=True)
