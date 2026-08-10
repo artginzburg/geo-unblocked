@@ -39,20 +39,28 @@ what Apple had, and re-imports it.
 A release named in `data/album_sources.json` is trusted outright — its cover *is*
 the album cover, so it bypasses the uploader check.
 
-### Spotify credentials
+### Spotify credentials (optional)
 
-Optional. Without them the source is skipped and everything else still works.
+**Entirely optional.** Without them Spotify is skipped and every other source
+works exactly as before — the four ahead of it already cover most of a library.
+It earns its place on the tail: releases that Apple, Deezer and Genius have all
+dropped sometimes survive there, so setting it up recovers a few more covers
+than going without. Nothing else changes, and nothing breaks if you never do it.
 
 Spotify blocks its unofficial web-player token endpoints and states plainly that
 using them breaches the Developer Terms, so this goes through the documented
-client-credentials flow and needs an app of your own:
+client-credentials flow, which needs an app of your own:
 
-1. Create one at <https://developer.spotify.com/dashboard> (no redirect URI needed).
-2. Copy `data/spotify.json.example` to `data/spotify.json` and fill in the two
+1. Create one at <https://developer.spotify.com/dashboard>, selecting **Web API**.
+2. **Redirect URI:** the dashboard demands one even though the
+   client-credentials flow never uses it — this tool never sends a user through
+   a login. Any valid value does; `http://127.0.0.1:8888/callback` is a safe
+   pick. Plain `http://localhost` is no longer accepted, so use the loopback IP.
+3. Copy `data/spotify.json.example` to `data/spotify.json` and fill in the two
    values, **or** export `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`.
 
-`data/spotify.json` is gitignored. The secret is yours; it should not be pasted
-into a chat or committed anywhere.
+`data/spotify.json` is gitignored. The secret is yours: fill it in locally, and
+do not paste it into a chat or commit it anywhere.
 
 Every cover is force-cropped to a centred square at 1200×1200. Apple itself serves
 some covers a few pixels off square, and Music renders anything non-square badly.
