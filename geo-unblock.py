@@ -1650,7 +1650,17 @@ def main():
         key = f"{row['Artist']} :: {row['Name']}"
         if st.get(key, {}).get("status") == "ok":
             print(f"[{i}] skip (done): {key}"); continue
-        want = int(row["Time"])
+        # Duration is the load-bearing check for everything downstream, so a row
+        # without one cannot be processed -- and must not take the whole run with
+        # it. One malformed row killed two full passes at exactly the same track,
+        # silently the first time, because the traceback went to a lost stream.
+        raw_time = (row.get("Time") or "").strip()
+        if not raw_time.isdigit():
+            st[key] = {"status": "no_duration", "note": f"Time={row.get('Time')!r}"}
+            print(f"[{i}] {key}\n      НЕТ ДЛИТЕЛЬНОСТИ в индексе — пропускаю")
+            save_state(st)
+            continue
+        want = int(raw_time)
         t0 = time.monotonic()
         print(f"[{i}] {key}  ({want}s)", flush=True)
 
