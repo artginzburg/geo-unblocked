@@ -1558,14 +1558,17 @@ def review(rows, approve=None):
             if 1 <= n <= len(items):
                 k, v = items[n - 1]
                 src[k] = v.get("url")
-                st.pop(k, None)
+                # Mark rather than delete. Removing the row leaves nothing for
+                # --retry to select, so the approval reported success and then
+                # nothing happened at all.
+                st[k] = {"status": "approved", "url": v.get("url")}
                 picked.append(k)
         TRACK_SOURCES.write_text(json.dumps(src, ensure_ascii=False, indent=2))
         save_state(st)
         print(f"одобрено и записано в track_sources.json: {len(picked)}")
         for k in picked:
             print(f"   {k}")
-        print("теперь: python3 geo-unblock.py --retry review  (или обычный прогон)")
+        print("теперь: python3 geo-unblock.py --retry approved")
         return
 
     print(f"\nВ РЕВЬЮ: {len(items)}\n")
