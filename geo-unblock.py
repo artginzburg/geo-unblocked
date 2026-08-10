@@ -633,13 +633,23 @@ def override_art(row):
         return None
     if "open.spotify.com" not in url:
         return url
-    r = subprocess.run(
-        ["curl", "-s", "--max-time", "20",
-         "https://open.spotify.com/oembed?url=" + url],
-        capture_output=True, text=True, timeout=40)
-    try:
-        thumb = json.loads(r.stdout).get("thumbnail_url")
-    except Exception:
+    # Retried: a single network hiccup here silently costs a cover that a person
+    # went to the trouble of naming, and the run reports "не нашлось" as if the
+    # image did not exist.
+    thumb = None
+    for _ in range(3):
+        r = subprocess.run(
+            ["curl", "-s", "--max-time", "20", "--retry", "2",
+             "https://open.spotify.com/oembed?url=" + url],
+            capture_output=True, text=True, timeout=60)
+        try:
+            thumb = json.loads(r.stdout).get("thumbnail_url")
+        except Exception:
+            thumb = None
+        if thumb:
+            break
+        time.sleep(2)
+    if not thumb:
         return None
     return thumb.replace("ab67616d00001e02", "ab67616d0000b273") if thumb else None
 

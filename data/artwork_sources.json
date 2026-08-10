@@ -1,4 +1,6 @@
 {
   "_comment": "Обложки, указанные вручную для треков, которых не находят автоматические источники. Значение — прямая ссылка на картинку либо ссылка на трек в Spotify (достаётся публичным oEmbed, без ключей).",
-  "Bass Boosted :: Pyrotex": "https://is1-ssl.mzstatic.com/image/thumb/Music30/v4/68/f0/18/68f01885-8424-f453-1d13-792fbe301d3e/811869168646_cover.jpg/1200x1200bb.jpg"
+  "Bass Boosted :: Pyrotex": "https://is1-ssl.mzstatic.com/image/thumb/Music30/v4/68/f0/18/68f01885-8424-f453-1d13-792fbe301d3e/811869168646_cover.jpg/1200x1200bb.jpg",
+  "DJ Quads :: Friends": "https://open.spotify.com/track/7qoC9EKv0NSqMzZdZEGBm6",
+  "The Buttshakers :: Wicked Woman": "https://open.spotify.com/track/75pOM8tAnjnkiWhCD7wjXT"
 }

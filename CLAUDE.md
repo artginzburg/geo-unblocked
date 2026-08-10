@@ -123,6 +123,19 @@ their artwork. Anything reached through `track_sources.json` or
 `album_sources.json` passes `vouched=True`. Demoting a human verdict is the same
 defect as forgetting it.
 
+## A store's absence is not the artist's absence
+
+"Not in iTunes" was once read as "this artist does not reach stores" — of a
+track sitting in the user's Apple Music library, which is where the whole
+project starts. Every track here was distributed; if a lookup misses, the query
+is wrong or the storefront differs.
+
+Queries by `artist + title` fail on common words: "DJ Quads Friends" returns The
+Killers and Nickelback. Searching the artist's catalogue instead
+(`attribute=artistTerm`) returned all 178 of their tracks — proving the artist
+is there — while the specific release was simply not in that storefront.
+Spotify had it, reachable through oEmbed with no account.
+
 ## Order the index deterministically
 
 `--start/--limit` address rows, so any change to row order silently changes what
