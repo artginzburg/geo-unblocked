@@ -147,3 +147,14 @@ Progress lives in `data/state.json` and every run resumes from it.
 `yt-dlp`, `ffmpeg`, Python 3, and macOS Music with AppleScript automation allowed.
 Reading files inside `~/Music/Music` additionally needs Full Disk Access, but the
 tool does not require it — it reads artwork out of Music itself.
+
+## Seeing what happened
+
+```bash
+python3 geo-unblock.py --report
+```
+
+Counts, sources, per-track timings, and everything left in review or unfound.
+Artwork and bitrate figures are read back out of Music rather than from the run
+log — state records what an import *intended*, and a later repair changes the
+library without touching it, so reporting the intention would be a lie.

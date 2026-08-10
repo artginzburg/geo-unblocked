@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """geo-unblocked -- re-acquire geoblocked Apple Music tracks and import them into Music.app.
 
-Sources are consulted strictly as fallbacks, in order: YouTube, SoundCloud, Mail.Ru.
-The search stops at the first match good enough to import unattended.
+A named release is tried first, then searches are consulted strictly as
+fallbacks -- YouTube, SoundCloud, Mail.Ru, YouTube Music -- stopping at the first
+match good enough to import unattended.
 """
 import argparse, csv, json, os, re, subprocess, sys, time, unicodedata
 from pathlib import Path
@@ -1043,6 +1044,10 @@ tell application "Music"
 end tell'''], capture_output=True, text=True, timeout=120)
                 if r.returncode == 0:
                     art_fixed += 1
+                    # Keep state truthful: --report reads it, and an artwork set
+                    # here would otherwise still be filed as "none" forever.
+                    if rec:
+                        rec["art"] = src
                     print(f"  обложка  {name} — {artist}  ({src})")
                 else:
                     missed += 1
@@ -1064,9 +1069,75 @@ end tell'''], capture_output=True, text=True, timeout=120)
         if r.returncode == 0:
             cmt_fixed += 1
 
+    save_state(state)
     print(f"\nобложек проставлено: {art_fixed} (не нашлось: {missed})")
     print(f"история подтянута: {hist_fixed}")
     print(f"комментариев записано: {cmt_fixed}")
+
+
+def report(rows):
+    """Human-readable summary of the run so far, read from state."""
+    st = load_state()
+    if not st:
+        print("состояние пусто — прогонов ещё не было"); return
+    order = {f"{r['Artist']} :: {r['Name']}": i for i, r in enumerate(rows)}
+    by_status = {}
+    for k, v in st.items():
+        by_status.setdefault(v.get("status", "?"), []).append((k, v))
+
+    total = len(st)
+    ok = by_status.get("ok", [])
+    print(f"\nОБРАБОТАНО: {total}")
+    for name, label in (("ok", "заменено"), ("already_live", "замена не нужна"),
+                        ("review", "в ревью"), ("not_found", "не найдено"),
+                        ("error", "ошибка")):
+        if by_status.get(name):
+            print(f"  {label:18} {len(by_status[name])}")
+
+    def tally(field, title):
+        counts = {}
+        for _, v in ok:
+            counts[v.get(field) or "—"] = counts.get(v.get(field) or "—", 0) + 1
+        if counts:
+            print(f"\n{title}: " + ", ".join(
+                f"{k} {n}" for k, n in sorted(counts.items(), key=lambda x: -x[1])))
+    tally("src", "источник звука")
+
+    # Artwork and bitrate are read back out of Music rather than from state.
+    # State records what an import intended; a later repair changes the library
+    # without touching it, and reporting the intention would be a lie.
+    live = subprocess.run(["osascript", "-e", f'''
+tell application "Music"
+  set o to ""
+  repeat with t in (every track of user playlist "{REFETCHED_PLAYLIST}")
+    set o to o & (count of artworks of t) & tab & (bit rate of t) & linefeed
+  end repeat
+  return o
+end tell'''], capture_output=True, text=True, timeout=180).stdout
+    arts = [x.split("\t") for x in live.split("\n") if "\t" in x]
+    if arts:
+        with_art = sum(1 for a in arts if a[0] != "0")
+        rates = sorted(int(a[1]) for a in arts if a[1].isdigit())
+        print(f"\nв библиотеке: {len(arts)} треков, с обложкой {with_art}")
+        if rates:
+            print(f"битрейт: медиана {rates[len(rates)//2]}k, "
+                  f"минимум {rates[0]}k, максимум {rates[-1]}k")
+
+    secs = sorted(v["secs"] for v in st.values() if v.get("secs"))
+    if secs:
+        print(f"\nвремя на трек: медиана {secs[len(secs)//2]:.0f}с, "
+              f"максимум {max(secs):.0f}с, суммарно {sum(secs)/60:.0f} мин")
+
+    for name, label in (("review", "В РЕВЬЮ (не импортированы)"),
+                        ("not_found", "НЕ НАЙДЕНО"), ("error", "ОШИБКИ")):
+        items = sorted(by_status.get(name, []), key=lambda kv: order.get(kv[0], 9999))
+        if not items:
+            continue
+        print(f"\n{label}:")
+        for k, v in items:
+            extra = v.get("cand") or v.get("error") or ""
+            print(f"  {k}" + (f"\n      кандидат: {extra[:70]}" if extra else ""))
+    print()
 
 
 def main():
@@ -1078,6 +1149,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--min-score", type=float, default=120,
                     help="below this a match is parked for review, not imported")
+    ap.add_argument("--report", action="store_true",
+                    help="print a summary of the run so far and exit")
     ap.add_argument("--repair", action="store_true",
                     help="patch already-imported tracks in place instead of fetching")
     a = ap.parse_args()
@@ -1090,6 +1163,10 @@ def main():
     ensure_playlists()
     st = load_state()
     rows = [r for r in csv.DictReader(LIST.open(), delimiter="\t") if r.get("Name")]
+
+    if a.report:
+        report(rows)
+        return
 
     if a.repair:
         repair(rows, st)
