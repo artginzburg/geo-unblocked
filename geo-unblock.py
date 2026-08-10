@@ -35,6 +35,14 @@ WIDE_PENALTY = 45
 DUR_LONG_MAX = 90
 LONG_PENALTY_PER_SEC = 0.25
 
+# Ceiling for a candidate with no artist evidence anywhere -- not in the
+# uploader, not in the title. Below the default --min-score, so such a match is
+# parked for review rather than imported. Without this, complete title
+# containment plus a duration inside the window was already worth 120 on its
+# own, and the artist bonuses were pure headroom that could never be
+# load-bearing: an unrelated performer's song of the same name auto-imported.
+NO_ARTIST_CAP = 115
+
 
 # The Apple export romanises Cyrillic artists ("Aleksey Vishnya") while every
 # source spells them in Cyrillic. Without folding both to one alphabet, a correct
@@ -163,12 +171,23 @@ end tell'''
         p[9] = when(p[9])         # Date Added
         rows.append(p[:15])
 
+    # Monotonic, never truncating. Membership here is "still unavailable" -- the
+    # very property a successful replacement removes -- so a plain rewrite would
+    # delete the backup row of every track this tool has already fixed, which is
+    # the only surviving record of its history. Keep what is no longer live.
+    live = len(rows)
+    if LIST.exists():
+        fresh = {(r[0], r[1]) for r in rows}
+        for old in csv.DictReader(LIST.open(), delimiter="\t"):
+            if old.get("Name") and (old["Name"], old.get("Artist", "")) not in fresh:
+                rows.append([old.get(c, "") for c in cols])
+
     LIST.parent.mkdir(parents=True, exist_ok=True)
     with LIST.open("w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
         w.writerow(cols)
         w.writerows(rows)
-    return len(rows)
+    return live
 
 
 def load_state():
@@ -348,7 +367,11 @@ def score(entry, name, artist, want_dur, lenient=False):
     elif diff <= DUR_WIDE:
         s = 100 - DUR_TOLERANCE * 3 - WIDE_PENALTY
     elif lenient and diff <= DUR_LONG_MAX:
-        s = 100 - DUR_TOLERANCE * 3 - diff * LONG_PENALTY_PER_SEC
+        # Continues downward from the wide band instead of restarting above it.
+        # Previously +13s outscored +5s, inverting the "smallest excess wins"
+        # rule this fallback is built on.
+        s = (100 - DUR_TOLERANCE * 3 - WIDE_PENALTY
+             - (diff - DUR_WIDE) * LONG_PENALTY_PER_SEC)
     else:
         return None
     title = entry.get("title") or ""
@@ -356,7 +379,9 @@ def score(entry, name, artist, want_dur, lenient=False):
 
     # "<Artist> - Topic" channels are the label-delivered audio YouTube generates
     # from the same masters the stores use. Always the best available source.
-    if uploader.endswith("- Topic"):
+    # Only when it is THIS artist's Topic channel. Unqualified, a wholly
+    # unrelated song on any "… - Topic" channel scored 160 and auto-imported.
+    if uploader.endswith("- Topic") and close(uploader, artist):
         s += 60
     if tokens(artist) & tokens(uploader):
         s += 25
@@ -378,6 +403,9 @@ def score(entry, name, artist, want_dur, lenient=False):
     # than a performer, leaving the title as the only honest signal.
     if entry.get("album") is not None and norm(title) == norm(name):
         s += 10
+
+    if not (tokens(artist) & (tokens(uploader) | t)):
+        s = min(s, NO_ARTIST_CAP)
 
     # Penalise anything advertising itself as a different rendition. The duration
     # gate catches most of these, but remasters and edits can match on length.
@@ -438,6 +466,11 @@ def fetch(url, out_base, attempts=3):
            "-o", f"{out_base}.%(ext)s", "-q", "--no-warnings",
            "--no-playlist", "--socket-timeout", "30",
            "--retries", "5", "--fragment-retries", "5"]
+    # A file already at this path is NOT evidence that this url was fetched.
+    # yt-dlp skips an existing target and still exits 0, and the staging name is
+    # keyed on artist+title, never on the url -- so a rejected download from an
+    # earlier attempt would be imported and stamped with a different source.
+    Path(f"{out_base}.m4a").unlink(missing_ok=True)
     last = None
     for i in range(attempts):
         try:
@@ -478,8 +511,14 @@ def effective_duration(path):
         return dur
     ends = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", err)]
     starts = [float(x) for x in re.findall(r"silence_start: ([\d.]+)", err)]
-    lead = ends[0] if ends and ends[0] < dur / 2 else 0.0
-    tail = dur - starts[-1] if starts and starts[-1] > dur / 2 else 0.0
+    # Anchor each gap to an actual edge. `ends[0]` is merely the end of the
+    # FIRST silence anywhere, so a pause mid-song used to be charged to the
+    # start: a 201s file with a 1s gap at 60s reported 129s of audio and the
+    # fabricated number was printed as evidence.
+    lead = ends[0] if ends and ends[0] < dur / 2 and (not starts or starts[0] < 0.5) else 0.0
+    tail = 0.0
+    if starts and starts[-1] > dur / 2 and (len(ends) < len(starts) or ends[-1] >= dur - 0.5):
+        tail = dur - starts[-1]
     return dur - lead - tail
 
 
@@ -938,13 +977,24 @@ end tell'''
     return r.stdout.strip() if r.returncode == 0 else "0"
 
 
-def inherit_history(name, artist):
+def inherit_history(name, artist, album=""):
     """Carry listening history from the dead original onto our new file, so the
-    leftover duplicate can be deleted without losing anything. Counts are raised
-    to the larger of the two rather than added: this runs again on every repair
-    pass, and adding made it inflate a little more each time. `date added` is deliberately absent -- Music refuses writes
-    to it, so the original add date cannot be preserved by any means."""
+    leftover duplicate can be deleted without losing anything.
+
+    Every count takes the LARGER of the two, on both the read and the write
+    side. The read used to accumulate across matches, which is wrong twice over:
+    it is not idempotent under repeated --repair, and the lookup is by name and
+    artist alone, so two different recordings of one song add together. This
+    library holds such a pair -- "Our Hearts Condemn Us" by Jozef Van Wissem
+    exists on two albums with 3 and 6 plays -- and summing wrote 9 onto a track
+    that had 3, with no way back since every later write only raises.
+
+    Each write gets its own `try`. One shared `try` meant the first failure
+    skipped the rest, and the statement that fails is known: copying a date
+    object between tracks. It sat ahead of the favourite write, so the favourite
+    was never reached."""
     esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
+    alb = f' and album is "{esc(album)}"' if album else ""
     scr = f'''
 tell application "Music"
   set deadPlays to 0
@@ -953,13 +1003,13 @@ tell application "Music"
   set deadLoved to false
   set deadRating to 0
   set found to false
-  repeat with t in (every track of library playlist 1 whose name is "{esc(name)}" and artist is "{esc(artist)}")
+  repeat with t in (every track of library playlist 1 whose name is "{esc(name)}" and artist is "{esc(artist)}"{alb})
     try
       if (cloud status of t as text) is "no longer available" then
         set found to true
-        set deadPlays to deadPlays + (played count of t)
+        if (played count of t) > deadPlays then set deadPlays to (played count of t)
         try
-          set deadSkips to deadSkips + (skipped count of t)
+          if (skipped count of t) > deadSkips then set deadSkips to (skipped count of t)
         end try
         try
           if (played date of t) is not missing value then
@@ -970,9 +1020,6 @@ tell application "Music"
           if favorited of t then set deadLoved to true
         end try
         try
-          if loved of t then set deadLoved to true
-        end try
-        try
           if (rating of t) > deadRating then set deadRating to (rating of t)
         end try
       end if
@@ -981,14 +1028,20 @@ tell application "Music"
   if not found then return "0"
 
   set moved to 0
-  repeat with t in (every file track of library playlist 1 whose name is "{esc(name)}" and artist is "{esc(artist)}")
+  repeat with t in (every file track of library playlist 1 whose name is "{esc(name)}" and artist is "{esc(artist)}"{alb})
+    set didSomething to false
     try
-      -- Take the larger, never the sum. Summing is not idempotent, and this
-      -- runs again on every repair pass: each one silently doubled the count.
-      if deadPlays > (played count of t) then set (played count of t) to deadPlays
-      try
-        if deadSkips > (skipped count of t) then set (skipped count of t) to deadSkips
-      end try
+      if deadPlays > (played count of t) then
+        set (played count of t) to deadPlays
+        set didSomething to true
+      end if
+    end try
+    try
+      if deadSkips > (skipped count of t) then set (skipped count of t) to deadSkips
+    end try
+    try
+      -- Isolated on purpose: copying a date object between tracks is the write
+      -- that fails, and it must not be able to take the others down with it.
       if deadDate is not missing value then
         set cur to missing value
         try
@@ -996,79 +1049,34 @@ tell application "Music"
         end try
         if cur is missing value or deadDate > cur then set (played date of t) to deadDate
       end if
-      if deadLoved then
-        -- Current Music exposes this as `favorited`; `loved` errors with a
-        -- descriptor mismatch. Both are attempted because the older name is
-        -- what older versions answer to, and a wrapped failure is silent --
-        -- which is exactly why this went unnoticed: nothing was ever carried.
-        try
-          set (favorited of t) to true
-        end try
-        try
-          set (loved of t) to true
-        end try
-      end if
-      if deadRating > 0 and (rating of t) is 0 then set (rating of t) to deadRating
-      set moved to moved + 1
     end try
+    try
+      if deadLoved and not (favorited of t) then
+        set (favorited of t) to true
+        set didSomething to true
+      end if
+    end try
+    try
+      if deadRating > 0 and (rating of t) is 0 then set (rating of t) to deadRating
+    end try
+    if didSomething then set moved to moved + 1
   end repeat
-  return (deadPlays as text)
+  -- Report what changed, read back, not what the dead entry happened to hold.
+  return (moved as text)
 end tell'''
     r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=120)
-    return r.stdout.strip() if r.returncode == 0 else "0"
-
-
-def apply_export_history(row):
-    """Write the play history recorded in the Apple export onto our new file.
-
-    This is the backstop that makes history survive regardless of what Music does
-    on import: a merge keeps it, a non-merge leaves a dead duplicate to inherit
-    from, and a destroyed entry leaves nothing at all -- but the export always
-    has the numbers. Counts are only raised, never lowered."""
-    want = int(row.get("Plays") or 0)
-    skips = int(row.get("Skips") or 0)
-    last = row.get("Last Played") or ""
-    # Composer is carried here rather than only in the file tags, so a repair pass
-    # can restore it on tracks imported before it was noticed. BPM is deliberately
-    # absent: the export has no such column and not one track in the library has it
-    # set, so there has never been anything to carry.
-    composer = (row.get("Composer") or "").strip()
-    pre = ""
-    try:
-        d, t = last.split(", ")
-        dd, mm, yyyy = (int(x) for x in d.split("."))
-        hh, mi = (int(x) for x in t.split(":"))
-        # `current date` inside a `tell application "Music"` block is captured by
-        # Music and errors out, so build the date in plain context first.
-        pre = (f'set dt to (current date)\nset day of dt to 1\n'
-               f'set year of dt to {yyyy}\nset month of dt to {mm}\nset day of dt to {dd}\n'
-               f'set time of dt to ({hh} * hours + {mi} * minutes)\n')
-    except Exception:
-        pre = ""
-    if not want and not skips and not pre and not composer:
-        return "0"
-    esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
-    scr = pre + f'''
-tell application "Music"
-  set t to (first file track of library playlist 1 whose name is "{esc(row['Name'])}" and artist is "{esc(row['Artist'])}")
-  if {want} > (played count of t) then set (played count of t) to {want}
-  try
-    if {skips} > (skipped count of t) then set (skipped count of t) to {skips}
-  end try
-  {'try' if composer else ''}
-  {f'if (composer of t) is "" then set (composer of t) to "' + esc(composer) + '"' if composer else ''}
-  {'end try' if composer else ''}
-  {"try" if pre else ""}
-  {"set (played date of t) to dt" if pre else ""}
-  {"end try" if pre else ""}
-  return (played count of t) as text
-end tell'''
-    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=120)
-    return r.stdout.strip() if r.returncode == 0 else "0"
+    if r.returncode != 0:
+        raise RuntimeError(f"inherit_history: {r.stderr.strip()[:160]}")
+    return r.stdout.strip()
 
 
 def add_to_music(path):
-    scr = f'tell application "Music" to add POSIX file "{path}"'
+    # The one interpolation in this file that used to go unescaped. A track
+    # named `No Place for No Hero (From "Borderlands 2")` produces a path with a
+    # double quote, and the script would not even compile -- so that track could
+    # never be imported, by any number of retries.
+    esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
+    scr = f'tell application "Music" to add POSIX file "{esc(str(path))}"'
     r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip())
@@ -1131,20 +1139,38 @@ def park_original(name, artist):
     culled in one go later. `cloud status = no longer available` is exactly what a
     geoblocked original reports, so it targets the dead entry and nothing else --
     our own import is a local file track and never carries that status."""
-    # Report the playlist's actual growth, not the number of duplicate calls made:
-    # Music merges most imports into the existing entry, after which there is no
-    # dead original left to park and the duplicate quietly does nothing.
+    # Reports the playlist's actual growth, not the number of duplicate calls.
+    #
+    # `before` is a reserved word in AppleScript (`insert ... before`), so the
+    # earlier version of this script never compiled -- and the caller returned
+    # "0" on any non-zero exit, making a syntax error indistinguishable from
+    # "nothing to park". It parked nothing for the whole project and said so in
+    # a way that read as normal. Hence the raise below, and hence no `try`
+    # around the write.
     esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
     scr = f'''
 tell application "Music"
   set pl to user playlist "{REPLACED_PLAYLIST}"
-  set before to (count of tracks of pl)
+  set wasCount to (count of tracks of pl)
+  set alreadyThere to {{}}
+  try
+    set alreadyThere to (get database ID of every track of pl)
+  end try
   repeat with t in (every track of library playlist 1 whose name is "{esc(name)}" and artist is "{esc(artist)}")
+    set dead to false
     try
-      if (cloud status of t as text) is "no longer available" then duplicate t to pl
+      if ((cloud status of t as text) is "no longer available") then
+        -- Parking runs again on every repair pass, so a second call must not
+        -- file a second copy of the same dead entry.
+        if (database ID of t) is not in alreadyThere then set dead to true
+      end if
     end try
+    -- The duplicate is deliberately OUTSIDE the try. Wrapped, it failed
+    -- silently for the entire project: 28 imports parked nothing at all, and
+    -- the review-and-cull playlist was empty without anyone being told.
+    if dead then duplicate t to pl
   end repeat
-  return ((count of tracks of pl) - before)
+  return ((count of tracks of pl) - wasCount)
 end tell'''
     r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=120)
     return r.stdout.strip() if r.returncode == 0 else "0"
@@ -1188,6 +1214,7 @@ tell application "Music"
 end tell'''], capture_output=True, text=True, timeout=180).stdout
 
     art_fixed = hist_fixed = cmt_fixed = missed = 0
+    unlisted = []
     for line in out.split("\n"):
         p = line.split("\t")
         if len(p) < 3:
@@ -1195,6 +1222,9 @@ end tell'''], capture_output=True, text=True, timeout=180).stdout
         name, artist, nart = p[0], p[1], int(p[2])
         row = exp.get((name, artist))
         if not row:
+            # Never a bare continue: this is the path that quietly did nothing
+            # for 24 of 28 tracks while printing a healthy summary.
+            unlisted.append(f"{name} — {artist}")
             continue
         rec = state.get(f"{artist} :: {name}", {})
 
@@ -1222,7 +1252,7 @@ end tell'''], capture_output=True, text=True, timeout=120)
                 missed += 1
                 print(f"  нет арта {name} — {artist}")
 
-        if inherit_history(name, artist) not in ("0", ""):
+        if inherit_history(name, artist, row.get("Album", "")) not in ("0", ""):
             hist_fixed += 1
         if apply_export_history(row) not in ("0", ""):
             hist_fixed += 1
@@ -1237,6 +1267,11 @@ end tell'''], capture_output=True, text=True, timeout=120)
             cmt_fixed += 1
 
     save_state(state)
+    if unlisted:
+        print(f"\nНЕ ТРОНУТО — нет строки в {LIST.name}: {len(unlisted)}")
+        for u in unlisted:
+            print(f"   {u}")
+        print("   (обнови индекс: --refresh-index)")
     print(f"\nобложек проставлено: {art_fixed} (не нашлось: {missed})")
     print(f"история подтянута: {hist_fixed}")
     print(f"комментариев записано: {cmt_fixed}")
@@ -1388,7 +1423,8 @@ def main():
         # Run this for every wide candidate headed for review, not only ones that
         # nearly cleared the bar: the whole point is that the score cannot decide
         # these, so gating the evidence on the score is circular.
-        if not a.dry_run and sc < a.min_score and DUR_TOLERANCE < off <= DUR_WIDE:
+        if (not a.dry_run and prov != "manual"
+                and DUR_TOLERANCE < off <= DUR_LONG_MAX and sc < a.min_score + 60):
             try:
                 cand = fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
                 eff = effective_duration(cand)
@@ -1400,7 +1436,11 @@ def main():
                           f"(Δ{eff - want:+.0f}s) — принято, score {sc:.0f}")
                     prefetched = cand
                 else:
-                    print(f"      чистого звука {eff:.0f}s (Δ{eff - want:+.0f}s) — другой монтаж")
+                    shown = f"{eff:.0f}s (Δ{eff - want:+.0f}s)" if eff else "не измерился"
+                    print(f"      чистого звука {shown} — другой монтаж")
+                    # Text must never outvote the audio: a candidate the
+                    # measurement rejected cannot stay above the import bar.
+                    sc = min(sc, a.min_score - 1)
                     cand.unlink(missing_ok=True)
             except Exception as ex:
                 print(f"      проверка тишины не удалась: {str(ex)[:60]}")
@@ -1434,7 +1474,7 @@ def main():
             add_to_playlist(tid, REFETCHED_PLAYLIST)
             # Only matters when the original did NOT merge; a merge already keeps
             # the history, and inherit_history finds no dead entry to copy from.
-            inherit_history(row["Name"], row["Artist"])
+            inherit_history(row["Name"], row["Artist"], row.get("Album", ""))
             plays = apply_export_history(row)
             # Music copies imports into its own Media folder, so the staged file is
             # now a second copy of the same audio. Drop it.
