@@ -158,6 +158,23 @@ down and a few are a step up.
 Opus is occasionally higher-bitrate, but Music cannot play it and transcoding to
 AAC loses more than the bitrate gains.
 
+## Before a full run, back the library up
+
+A slice of thirty is repairable by hand; a full pass is not. Both halves matter,
+and the small one matters more:
+
+```bash
+osascript -e 'tell application "Music" to quit'
+ditto ~/Music/Music/"Music Library.musiclibrary" ~/Backups/music-$(date +%F)/"Music Library.musiclibrary"
+open -a Music
+rsync -a ~/Music/Music/Media.localized/ ~/Backups/music-$(date +%F)/Media/
+```
+
+The database holds the play counts, playlists, favourites and add dates — the
+part no download can restore — and it is ~97MB against ~17GB of audio. Quit
+Music before copying it, or the snapshot may be inconsistent. Keep the backup
+outside `~/Music` so Music does not index it.
+
 ## Usage
 
 ```bash

@@ -218,6 +218,33 @@ populate the field and the export has no column for it. Do not go looking.
 `grouping` is likewise empty everywhere. `composer` is the one that mattered: 17
 of the 241 tracks have one, and it was being dropped until noticed.
 
+## Back the library up before a full pass
+
+A slice touches thirty entries and a mistake is repairable by hand. A full pass
+touches every broken track in the library, and this project has already lost
+data twice in ways nobody noticed until much later. Before running the whole
+list, take both:
+
+```bash
+osascript -e 'tell application "Music" to quit'   # wait for it to exit
+ditto ~/Music/Music/"Music Library.musiclibrary" ~/Backups/music-<date>/"Music Library.musiclibrary"
+open -a Music
+rsync -a ~/Music/Music/Media.localized/ ~/Backups/music-<date>/Media/
+```
+
+**Quit Music first for the database.** It is the irreplaceable half — play
+counts, playlists, favourites, add dates — and copying it while Music is running
+risks an inconsistent snapshot. It is also small: ~97MB against ~17GB of media,
+so there is no excuse for skipping it.
+
+Keep the backup **outside** `~/Music`. A copy of thousands of `.m4a` files
+inside the media folder invites Music and LaunchServices to index them, which is
+its own class of trouble (see the stray-bundle problem in the user's global
+notes).
+
+The media copy matters less — most of it is re-downloadable — but it holds the
+user's own local files, which are not.
+
 ## The index is the backup
 
 `data/list.tsv` is not just an input list. It holds `Plays`, `Last Played`,
