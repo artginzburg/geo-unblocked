@@ -29,6 +29,7 @@ what Apple had, and re-imports it.
 
 | source | verified on | notes |
 |---|---|---|
+| named by hand | a human said so | `data/artwork_sources.json`; beats every guess |
 | another library copy | — | literally the cover Apple was showing |
 | iTunes | artist + album | search by *track*; searching by album misses constantly |
 | Deezer | artist + album | catches compilations and small labels Apple dropped |
@@ -39,25 +40,33 @@ what Apple had, and re-imports it.
 A release named in `data/album_sources.json` is trusted outright — its cover *is*
 the album cover, so it bypasses the uploader check.
 
-### Spotify credentials (optional)
+### Naming a cover by hand
 
-**Entirely optional.** Without them Spotify is skipped and every other source
-works exactly as before — the four ahead of it already cover most of a library.
-It earns its place on the tail: releases that Apple, Deezer and Genius have all
-dropped sometimes survive there, so setting it up recovers a few more covers
-than going without. Nothing else changes, and nothing breaks if you never do it.
+For the handful of tracks every source misses, put the cover in
+`data/artwork_sources.json`, keyed `Artist :: Track`. The value is either a
+direct image URL or a **Spotify track link**, which is resolved through
+Spotify's public oEmbed endpoint — no credentials, no account. oEmbed hands back
+the 300px variant and the CDN id maps straight onto the 640px one.
 
-Spotify blocks its unofficial web-player token endpoints and states plainly that
-using them breaches the Developer Terms, so this goes through the documented
-client-credentials flow, which needs an app of your own:
+A hand-named cover is tried first: a deliberate human choice outranks every
+heuristic in the chain.
 
-1. Create one at <https://developer.spotify.com/dashboard>, selecting **Web API**.
-2. **Redirect URI:** the dashboard demands one even though the
-   client-credentials flow never uses it — this tool never sends a user through
-   a login. Any valid value does; `http://127.0.0.1:8888/callback` is a safe
-   pick. Plain `http://localhost` is no longer accepted, so use the loopback IP.
-3. Copy `data/spotify.json.example` to `data/spotify.json` and fill in the two
-   values, **or** export `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`.
+### Spotify Web API (optional, and probably not worth it)
+
+The search-based Spotify source needs an app of your own, and **Spotify gates
+the Web API checkbox behind a Premium subscription** — a second music
+subscription is an absurd price for a few covers, so the oEmbed route above is
+the better answer. The unofficial web-player token endpoints are not an
+alternative: they are blocked, and Spotify states outright that using them
+breaches the Developer Terms.
+
+If you happen to have Premium: create an app at
+<https://developer.spotify.com/dashboard> selecting **Web API**; the dashboard
+demands a redirect URI even though the client-credentials flow never uses one,
+so any valid value does (`http://127.0.0.1:8888/callback` — plain
+`http://localhost` is no longer accepted). Then copy
+`data/spotify.json.example` to `data/spotify.json` and fill it in, or export
+`SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`.
 
 `data/spotify.json` is gitignored. The secret is yours: fill it in locally, and
 do not paste it into a chat or commit it anywhere.

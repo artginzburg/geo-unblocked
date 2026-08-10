@@ -389,6 +389,37 @@ def squarify(src, dst):
     return r.returncode == 0 and dst.exists() and dst.stat().st_size > 1000
 
 
+ARTWORK_SOURCES = ROOT / "data" / "artwork_sources.json"
+
+
+def override_art(row):
+    """A cover named by hand for a track the automated sources all miss.
+
+    Values are either a direct image URL or a Spotify link. Spotify is resolved
+    through its public oEmbed endpoint, which needs no credentials -- the Web API
+    would, and its dashboard gates that behind a Premium subscription, which is
+    an absurd price for a handful of covers. oEmbed returns the 300px variant;
+    the CDN id maps straight onto the 640px one."""
+    try:
+        srcs = json.loads(ARTWORK_SOURCES.read_text()) if ARTWORK_SOURCES.exists() else {}
+    except Exception:
+        return None
+    url = srcs.get(f"{row['Artist']} :: {row['Name']}")
+    if not url:
+        return None
+    if "open.spotify.com" not in url:
+        return url
+    r = subprocess.run(
+        ["curl", "-s", "--max-time", "20",
+         "https://open.spotify.com/oembed?url=" + url],
+        capture_output=True, text=True, timeout=40)
+    try:
+        thumb = json.loads(r.stdout).get("thumbnail_url")
+    except Exception:
+        return None
+    return thumb.replace("ab67616d00001e02", "ab67616d0000b273") if thumb else None
+
+
 def library_art(row, dst):
     """Lift artwork off another copy of the same song already in the library.
     This is the best source there is -- it is literally the cover Apple was
@@ -550,6 +581,15 @@ def get_art(row, thumb_url, uploader="", trusted_thumb=False):
     raw = SCRATCH / "art_raw"
     for p in (art, raw):
         p.unlink(missing_ok=True)
+
+    # 0. A cover named by hand. A deliberate human choice outranks every guess.
+    named = override_art(row)
+    if named:
+        subprocess.run(["curl", "-sL", "-o", str(raw), named], timeout=60)
+        if raw.exists() and raw.stat().st_size > 2000 and squarify(raw, art):
+            raw.unlink(missing_ok=True)
+            return art, "named"
+        raw.unlink(missing_ok=True)
 
     # 1. Another copy already in the library -- the cover Apple itself showed.
     if library_art(row, str(raw)) and raw.stat().st_size > 2000 and squarify(raw, art):
