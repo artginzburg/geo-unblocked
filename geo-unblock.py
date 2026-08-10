@@ -927,61 +927,97 @@ def image_search_art(row, hint=""):
 
 
 def spotify_via_search(row):
-    """Reach Spotify without an account, and without trusting a caption.
+    """Find the track on Spotify without an account, and verify what was found.
 
-    Its Web API is behind Premium and its oEmbed endpoint needs a track link,
-    which no API here can produce. But image search results carry the page they
-    came from, and those pages are often Spotify tracks -- so the link can be
-    discovered rather than typed. Each candidate is then resolved through oEmbed
-    and accepted only when Spotify's OWN title matches the wanted one. That is a
-    far stronger check than the caption beside the picture, which routinely
-    names a different track from the same album."""
+    Spotify is the only catalogue that still has some of these releases: a track
+    is "no longer available" precisely because Apple removed it, so no Apple
+    lookup can ever return it, and Deezer, Genius, JioSaavn and MusicBrainz do
+    not carry the long tail either.
+
+    Its API is behind Premium and oEmbed needs a track link, so the link has to
+    be discovered. Brave is the one search engine that serves those links in
+    plain HTML -- DuckDuckGo (html and lite), Bing (even with its base64
+    redirects decoded), Mojeek, Marginalia, Startpage, Ecosia and Yandex all
+    return none. Image results are kept as a second pass, since they carry the
+    page they came from.
+
+    Every candidate is resolved through oEmbed and accepted only when Spotify's
+    OWN title matches. Nothing here trusts a caption or a search ranking."""
     import urllib.parse
-    queries = [f"{row['Artist']} {row['Name']} spotify"]
     album = re.sub(r" - (Single|EP)$", "", row.get("Album") or "")
+    queries = [f"{row['Artist']} {row['Name']} spotify"]
     if album and album != row["Name"]:
         queries.append(f"{row['Artist']} {album} spotify")
 
-    seen, want = set(), norm(row["Name"])
-    for q in queries:
-        for page in ("1", "2"):
-            r = subprocess.run(
-                ["curl", "-s", "-A", UA_BROWSER, "--max-time", "20",
-                 "https://duckduckgo.com/?q=" + urllib.parse.quote(q) + "&iax=images&ia=images"],
-                capture_output=True, text=True, timeout=40)
-            mm = re.search(r'vqd="?([\d-]+)"?', r.stdout)
-            if not mm:
+    want, seen = norm(row["Name"]), set()
+
+    def check(links):
+        for link in links:
+            if link in seen:
                 continue
-            r2 = subprocess.run(
-                ["curl", "-s", "-A", UA_BROWSER, "-H", "Referer: https://duckduckgo.com/",
-                 "--max-time", "20",
-                 f"https://duckduckgo.com/i.js?l=us-en&o=json&q={urllib.parse.quote(q)}"
-                 f"&vqd={mm.group(1)}&f=,,,&p={page}"],
-                capture_output=True, text=True, timeout=40)
+            seen.add(link)
+            o = subprocess.run(
+                ["curl", "-s", "--max-time", "15",
+                 "https://open.spotify.com/oembed?url=https://" + link.lstrip("htps:/")
+                 if not link.startswith("http") else
+                 "https://open.spotify.com/oembed?url=" + link],
+                capture_output=True, text=True, timeout=30)
             try:
-                results = json.loads(r2.stdout).get("results", [])
+                d = json.loads(o.stdout)
             except Exception:
                 continue
-            for x in results:
-                for link in re.findall(
-                        r"https://open\.spotify\.com/(?:intl-[a-z]+/)?track/[A-Za-z0-9]{22}",
-                        (x.get("url") or "") + " " + (x.get("source") or "")):
-                    if link in seen:
-                        continue
-                    seen.add(link)
-                    o = subprocess.run(
-                        ["curl", "-s", "--max-time", "15",
-                         "https://open.spotify.com/oembed?url=" + link],
-                        capture_output=True, text=True, timeout=30)
-                    try:
-                        d = json.loads(o.stdout)
-                    except Exception:
-                        continue
-                    if norm(d.get("title") or "") != want:
-                        continue
-                    thumb = d.get("thumbnail_url")
-                    if thumb:
-                        return thumb.replace("ab67616d00001e02", "ab67616d0000b273")
+            if norm(d.get("title") or "") != want:
+                continue
+            thumb = d.get("thumbnail_url")
+            if thumb:
+                return thumb.replace("ab67616d00001e02", "ab67616d0000b273")
+        return None
+
+    pat = r"open\.spotify\.com/(?:intl-[a-z]+/)?track/[A-Za-z0-9]{22}"
+    for q in queries:
+        r = subprocess.run(
+            ["curl", "-sL", "-A", UA_BROWSER, "--max-time", "25", "-w", "\n%{http_code}",
+             "https://search.brave.com/search?q=" + urllib.parse.quote(q)],
+            capture_output=True, text=True, timeout=60)
+        body, _, code = r.stdout.rpartition("\n")
+        # Brave rate-limits after a handful of queries and answers 429 with a
+        # CAPTCHA page. That page contains no links, so an unchecked status turns
+        # "we were blocked" into "there is no cover" -- say so instead.
+        if code.strip() == "429" or "captcha" in body[:4000].lower():
+            print("      Brave ограничил запросы (429) — ссылку найти нечем", flush=True)
+            break
+        got = check(["https://" + x for x in
+                     sorted(set(re.findall(pat, urllib.parse.unquote(body))))])
+        if got:
+            return got
+
+    # Second pass: image results carry their source page, which is often a
+    # Spotify track even when the web results do not surface it.
+    for q in queries:
+        r = subprocess.run(
+            ["curl", "-s", "-A", UA_BROWSER, "--max-time", "20",
+             "https://duckduckgo.com/?q=" + urllib.parse.quote(q) + "&iax=images&ia=images"],
+            capture_output=True, text=True, timeout=40)
+        mm = re.search(r'vqd="?([\d-]+)"?', r.stdout)
+        if not mm:
+            continue
+        r2 = subprocess.run(
+            ["curl", "-s", "-A", UA_BROWSER, "-H", "Referer: https://duckduckgo.com/",
+             "--max-time", "20",
+             f"https://duckduckgo.com/i.js?l=us-en&o=json&q={urllib.parse.quote(q)}"
+             f"&vqd={mm.group(1)}&f=,,,&p=1"],
+            capture_output=True, text=True, timeout=40)
+        try:
+            results = json.loads(r2.stdout).get("results", [])
+        except Exception:
+            continue
+        links = []
+        for x in results:
+            links += ["https://" + y for y in re.findall(
+                pat, (x.get("url") or "") + " " + (x.get("source") or ""))]
+        got = check(links)
+        if got:
+            return got
     return None
 
 

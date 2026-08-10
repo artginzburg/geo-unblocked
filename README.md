@@ -84,13 +84,17 @@ Apple's to within a second each.
 A cover in `artwork_sources.json` may be a Spotify track link; it resolves
 through Spotify's public oEmbed endpoint, which needs no account.
 
-The tool also tries to **find** such a link by itself: image-search results carry
-the page they came from, those pages are often Spotify tracks, and each is
-resolved through oEmbed and accepted only when Spotify's own title matches the
-wanted one. That is stronger than trusting the caption beside the picture, which
-routinely names a different track from the same album. It works — but search
-recall for obscure releases is poor, so naming the link by hand is still the
-reliable route for the tail.
+The tool also tries to **find** such a link by itself, searching Brave and then
+DuckDuckGo's image results, and resolving every candidate through oEmbed —
+accepting it only when Spotify's own title matches. That is stronger than
+trusting the caption beside a picture, which routinely names a different track
+from the same album.
+
+It works, and it has a hard ceiling: Brave is the only engine that serves these
+links in plain HTML, and it rate-limits after a handful of queries with a CAPTCHA
+page that looks like an empty result. Over a couple of hundred tracks it will be
+blocked long before the end, so the hand-named map is still the reliable route
+for the tail.
 
 ## Artwork sources, in descending order of trust
 

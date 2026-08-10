@@ -157,6 +157,27 @@ for "no cover exists".
 a slice means. Rebuilding the index once reordered it and a 30-track run walked
 22 tracks nobody had agreed to. Sort by artist then title, always.
 
+## Finding a Spotify link: what works, and its ceiling
+
+Some releases survive only on Spotify — a track is unavailable precisely because
+Apple removed it, so no Apple lookup can return it, and Deezer, Genius, JioSaavn
+and MusicBrainz do not carry the long tail either. Spotify's API is behind
+Premium; its oEmbed endpoint works with no account but needs a track link.
+
+**Brave is the only search engine that serves those links in plain HTML.**
+Measured, all returning zero: DuckDuckGo html and lite, Bing (including its
+base64 `u=a1…` redirects decoded), Mojeek, Marginalia, Startpage, Ecosia,
+Yandex. DuckDuckGo's *image* endpoint does work as a second pass, since results
+carry their source page.
+
+**Brave rate-limits after a handful of queries** — HTTP 429 with a CAPTCHA page
+that parses as "no results". So it cannot be the primary route for a 200-track
+pass, and the status code must be checked or a block reads as an absence. For
+the tail, `artwork_sources.json` stays the reliable answer.
+
+Whatever is found is resolved through oEmbed and accepted only when Spotify's
+own title matches. Never trust the caption beside an image or a search ranking.
+
 ## A network failure must never look like an absence
 
 Every artwork source ends in a download, and an unretried one turns a blip into
