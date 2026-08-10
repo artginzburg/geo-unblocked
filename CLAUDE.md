@@ -1,124 +1,199 @@
 # geo-unblocked — working notes
 
-Read the README first for what the tool does. This file is the accumulated
-knowledge about *how it behaves in practice*, most of it learned by getting it
-wrong once. None of it is guessable from the code.
+For agents working on this repo. The README says what the tool does; this file
+says how it behaves in practice. Nearly everything here was learned by getting
+it wrong once, and none of it is guessable from the code.
+
+## Keeping these two files current
+
+**Update both docs in the same change that alters behaviour** — not afterwards,
+not when asked. A fix whose reasoning lives only in a commit message is a fix
+the next agent will undo.
+
+- **CLAUDE.md** is read by agents. Record invariants, traps, and *why* a rule
+  exists. When a defect is found, write down the mistaken assumption behind it,
+  not just the correction — the assumption is what will recur. Approaches that
+  were tried and rejected belong here too, with the evidence that killed them,
+  so they are not reinvented.
+- **README.md** is read by people and agents both. Keep it about what the tool
+  does, what it cannot do, and how to run it. Practical consequences belong
+  here; post-mortems belong in CLAUDE.md.
+- Anything asserted in either file should be checkable. Prefer a measured number
+  ("13 tracks had inflated counts") over a characterisation ("counts drifted").
 
 ## The goal, restated
 
-Not "download the songs." **Replace a dead library entry with a live one while the
-library keeps believing it is the same track.** Play history and playlist membership
-matter as much as the audio. A replacement that loses 24 plays is a failure even if
-it sounds perfect.
+Not "download the songs." **Replace a dead library entry with a live one while
+the library keeps believing it is the same track.** Play history and playlist
+membership matter as much as the audio. A replacement that loses 24 plays is a
+failure even if it sounds perfect.
 
-## Verify against Music, never against the log
+## Verify against Music, never against a proxy
 
-The single most expensive mistake in this project: reporting success from what the
-script *intended* rather than what the library *holds*.
+The most expensive recurring mistake here: reporting what the script *intended*
+instead of what the library *holds*.
 
-The log said `art=store` for tracks whose artwork was still a padded 480×270 video
-frame. Music had silently kept the old file. Every claim about a track must be read
-back out of Music — pull `raw data of artwork`, read `played count`, measure the
-image — before it is stated.
-
-Two separate counters in this project reported successes that never happened,
-because they incremented on the *attempt* rather than the *result*. Count what
-changed, not what was tried.
+- The log said `art=store` for tracks whose artwork was still a padded 480×270
+  video frame; Music had silently kept the old file. Read artwork back with
+  `raw data of artwork` and measure it.
+- Two counters reported successes that never happened, because they incremented
+  on the attempt rather than the result. Count what changed.
+- A smart playlist's size was read as proof that favourites had been destroyed.
+  Its criterion was compound (geoblocked **and** loved), so tracks leaving it
+  had merely stopped being geoblocked. Nothing was lost. **Measure the property
+  itself, never a number that depends on it.**
 
 ## How Music actually behaves on import
 
-- **It merges.** Adding a file whose song already exists usually folds it into the
-  existing entry, preserving play counts and playlist membership. This is the best
-  outcome and it happens for roughly 4 out of 5 tracks.
-- **A re-import does not replace.** If our file is already there, Music matches the
-  new copy to it and **keeps the old one**. Re-running changes nothing unless the
-  previous import is deleted first.
-- **It leaves orphans.** Rather than overwriting, it writes `Track 1.m4a`,
-  `Track 2.m4a` beside the original. These accumulate across runs and are invisible
-  from the library.
-- **Merged entries are indistinguishable from ours.** After a merge, our file *is*
-  the user's entry. Deleting "our" tracks in bulk therefore destroys their record —
-  this cost one track's 2017 add date and 3 plays before it was noticed. Never bulk
-  delete without re-adding; inside the script it is safe because delete and add are
-  adjacent.
+- **It merges.** Adding a file whose song already exists usually folds it into
+  the existing entry, preserving play counts and playlist membership. Best
+  outcome, and it happens for roughly 4 out of 5 tracks.
+- **A re-import does not replace.** If our file is already there, Music matches
+  the new copy to it and keeps the old one. Re-running changes nothing unless
+  the previous import is deleted first.
+- **It leaves orphans.** Rather than overwriting it writes `Track 1.m4a`,
+  `Track 2.m4a` beside the original. These accumulate and are invisible from the
+  library; find them by diffing files on disk against `location` of every file
+  track, never by date alone — one file dated the same day was the user's own.
+- **Merged entries are indistinguishable from ours.** After a merge our file
+  *is* the user's entry, so deleting "our" tracks in bulk destroys their record.
+  This has cost real data twice: one track's 2017 add date and 3 plays, and a
+  second track that vanished from the library entirely because a hand-approved
+  match was not re-added afterwards. Inside the script it is safe, because
+  delete and add are adjacent. As a standalone cleanup it is not.
 
 ## AppleScript traps
 
-- **`date added` is read-only.** `set date added` returns `Unknown object type` by
-  every route tried. Not a bug to work around — write it into the comment.
-- **`current date` inside `tell application "Music"` is captured by Music** and
+- **`date added` is read-only.** `set date added` returns `Unknown object type`
+  by every route tried. Not a bug to work around — write it into the comment.
+- **`favorited`, not `loved`.** `loved` raises a descriptor mismatch on current
+  Music. Both these calls sat inside a `try` that swallowed the error, so the
+  flag was never carried and nothing reported a failure. **A silent `try` around
+  a write is how a feature stays broken for a whole project.**
+- **`current date` inside `tell application "Music"`** is captured by Music and
   fails the same way. Build dates outside the tell block.
-- **Deleting while iterating invalidates indices.** Collect `database ID`s first,
-  delete after.
-- **Park the original *before* importing.** During a merge the dead entry briefly
+- **Deleting while iterating invalidates indices.** Collect `database ID`s
+  first, delete after.
+- **Park the original before importing.** During a merge the dead entry briefly
   stops being findable, so a park that runs afterwards silently finds nothing.
-- **Writable:** `played count`, `played date`, `skipped count`, `loved`, `rating`,
-  `comment`, artwork via `set data of artwork 1`. **Not writable:** `date added`.
+- **Writable:** `played count`, `played date`, `skipped count`, `favorited`,
+  `rating`, `comment`, `composer`, artwork via `set data of artwork 1`.
+  **Not writable:** `date added`.
 - **Copying a date object between tracks fails**; a constructed date works.
+- Listing every track property at once times out on a 6500-track library. Fetch
+  one property per call with `get <prop> of every track` and zip the columns.
+
+## Anything that runs twice must be idempotent
+
+`--repair` is expected to be run repeatedly, so every operation it performs has
+to converge. `inherit_history` added the dead entry's play count to the current
+one — correct once, wrong on every later pass. One track reached **174 plays
+against an export figure of 24**, and 13 tracks were inflated before anyone
+looked. It now raises to the larger of the two.
+
+Applies to anything else added: prefer "set to max", "set if empty", "replace"
+over "add" or "append".
 
 ## Matching
 
 Duration is the only trustworthy signal. Titles lie constantly — "(lyrics)",
-"(Official Audio)", live rips and sped-up edits all read as the real thing. A live
-rip of Akon scored respectably on text alone and was caught only by length.
+"(Official Audio)", live rips and sped-up edits all read as the real thing. A
+live rip of Akon scored respectably on text alone and was caught only by length.
 
-The Apple export **transliterates Cyrillic artists** ("Akvarium", "Aleksey Vishnya"),
-so artist-qualified queries miss entirely for Russian material. The bare-title query,
-still duration-gated, is what recovers them — and Mail.Ru is often the only place
-that material exists at all.
+**The duration rule is asymmetric.** Shorter than the original means audio is
+missing and can never be right; longer still contains the whole recording. Short
+is rejected outright, long is penalised and allowed as a second-pass fallback.
+
+**Measure the audio, not the container.** A candidate a few seconds long is
+often the same recording with padded silence. `silencedetect` settles it: one
+track ran 206s in the file and 198s of actual sound against an expected 195s.
+
+The Apple export **romanises Cyrillic artists** ("Akvarium", "Aleksey Vishnya"),
+so artist-qualified queries miss entirely for Russian material. Both the matcher
+and the artwork search fold Cyrillic to Latin, and image search additionally
+queries using the source's own title, where the native spelling survives.
 
 `- Topic` channels are label-delivered audio and outrank everything else.
 
+**Verify the artist, every time.** Three near-misses came from matching a title
+and a duration and nothing else: a different artist's "Лодка" with a convincing
+Apple cover, a "Nuvole Bianche" from a baby-sleep compilation two seconds off,
+and an "American Funeral" seven seconds off by an unrelated band. Common titles
+and common lengths are not evidence.
+
+## Human verdicts must outlive the run
+
+Scoring cannot rank everything. When a person approves a low-scoring match, that
+decision goes in `data/track_sources.json`, applied ahead of every search with
+no score gate. This is not a convenience: a verdict held only in conversation
+was lost on the next clean run, which re-parked the track in review — and
+because its entry had merged, the delete preceding that run took it out of the
+library altogether.
+
+Same shape, different scope: `data/album_sources.json` names a whole release,
+`data/artwork_sources.json` names one cover.
+
 ## Fields, and which ones are real
 
-Carried: play count, last played, skips, loved, rating, composer.
+Carried: play count, last played, skips, favorited, rating, composer.
 
 **BPM is not missing — it was never there.** Zero of the 220 geoblocked entries
-and zero file tracks in the whole library have it set. Apple does not populate
-the field and the export has no column for it. Do not go looking for a way to
-carry it.
+and zero file tracks in the whole 6500-track library have it set. Apple does not
+populate the field and the export has no column for it. Do not go looking.
 
-`grouping` is likewise empty everywhere. `composer` is the one that mattered:
-17 of the 241 tracks have one, and it was being dropped until noticed.
-
-## Sources, in practice
-
-**JioSaavn's "320" is a tier label, not a promise.** Asking for format 320
-explicitly still returned a 98kbps file for one track while another from the
-same album came back at an honest 324. Check what actually arrived.
-
-**JioSaavn search is useless for Western catalogue.** "Gorillaz White Light"
-returns nothing, "Fall Out Boy 27" returns karaoke, "2 Ton Truck" returns Hindi
-songs containing "To". It cannot be used to survey a library — absence of a hit
-there means the search failed, not that the record is missing. The album route
-(`data/album_sources.json`) is the only reliable way in.
-
-**Verify the artist, every time.** Three separate near-misses in this project
-came from matching a title and a duration and nothing else: a different artist's
-"Лодка" with a convincing Apple cover, a "Nuvole Bianche" from a baby-sleep
-compilation two seconds off, and an "American Funeral" seven seconds off by an
-unrelated band. Common titles and common lengths are not evidence.
+`grouping` is likewise empty everywhere. `composer` is the one that mattered: 17
+of the 241 tracks have one, and it was being dropped until noticed.
 
 ## The export is a backup
 
-`data/Geoblocked.txt` is not just an input list. It holds `Plays`, `Last Played`,
-`Skips` and `Date Added` for every track, and it is the *only* surviving record once
-a library entry is gone. It has already been used to restore history that was
-destroyed. There is no `Loved` column, so loved can only ever come from the dead
-entry — if that entry is gone, it is gone.
+`data/Geoblocked.txt` is not just an input list. It holds `Plays`, `Last
+Played`, `Skips` and `Date Added` for every track, and it is the *only*
+surviving record once a library entry is gone. It has already been used to
+restore history that was destroyed.
+
+There is no `Loved` column, so `favorited` can only come from the dead entry. If
+that entry is gone, the flag is gone with it.
+
+## Sources, in practice
+
+- **JioSaavn's "320" is a tier label, not a promise.** Requesting format 320
+  explicitly still returned 98kbps for one track while another from the same
+  album arrived at an honest 324. Check what came back.
+- **JioSaavn search is useless for Western catalogue.** "Gorillaz White Light"
+  returns nothing, "Fall Out Boy 27" returns karaoke, "2 Ton Truck" returns
+  Hindi songs containing "To". No hit there means the search failed, not that
+  the record is absent — so a library cannot be surveyed through it. The album
+  route is the only reliable way in.
+- **YouTube Music indexes Art Tracks plain YouTube search does not**, and gives
+  structured artist/album/track fields. That is how a release published under a
+  translated title was found: "Капитан Джек Воробей" is up as "Capitán Jack
+  Sparrow" and matched on artist and an exact duration despite sharing no words.
+- **Spotify's Web API is gated behind Premium**, so its search source is
+  effectively unavailable. Its public oEmbed endpoint needs no account but works
+  only from a track link. The unofficial web-player token endpoints are blocked
+  and their use breaches Spotify's Developer Terms — not an option.
+- **Production-music libraries** (Bosshouse/Transphonic here) license rather
+  than distribute; only showcase compilations are public, and Apple's copy may
+  be a 90-second edit that exists nowhere else. Fifteen of the 241 tracks come
+  from one such compilation.
 
 ## Performance
 
-Every search is a `yt-dlp` network round-trip. With three providers and four query
-variants that is up to twelve calls per track. Providers must therefore be
-consulted as **strict fallbacks** — stop the moment a match clears the auto-import
-threshold. Per-track timings are recorded as `secs` in `data/state.json`.
+Every search is a `yt-dlp` network round-trip, and with five source paths and
+four query variants that reaches a dozen calls per track. Providers are
+therefore **strict fallbacks**: stop the moment a match clears the auto-import
+threshold. Getting this wrong cost 26s per track; fixing it brought the median
+to 7s. Per-track timings live in `data/state.json` as `secs` and `--report`
+prints them.
 
 ## Working agreements with Art
 
-- **Do not ask about running the full 241-track pass.** It happens when Art says so,
-  and not before. The 30-track slice is the development set.
-- The target is all 30 replaced, not "most of them."
+- **Do not ask about running the full 241-track pass.** It happens when Art says
+  so. The 30-track slice is the development set.
+- The target is all 30, not "most of them."
 - One change at a time; report a latent fragility once rather than pushing it.
 - Commit locally so GPG signing applies. Never write files through the GitHub
   Contents API.
+- Long-running work goes in the background with a waiter. `pgrep -f "name.py"`
+  matches the waiting shell's own command line; write `pgrep -f "name[.]py"` so
+  it cannot match itself.
