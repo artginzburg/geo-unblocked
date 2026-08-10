@@ -1538,6 +1538,49 @@ end tell'''], capture_output=True, text=True, timeout=120)
     print(f"комментариев записано: {cmt_fixed}")
 
 
+def review(rows, approve=None):
+    """Show what is parked, with the evidence a person needs, and record verdicts.
+
+    An approval is written to track_sources.json rather than acted on directly:
+    a decision that lives only in a run is lost the next time, and this project
+    has already lost a track that way."""
+    st = load_state()
+    idx = {(r["Name"], r["Artist"]): r for r in rows}
+    items = sorted(((k, v) for k, v in st.items() if v.get("status") == "review"),
+                   key=lambda kv: -(kv[1].get("score") or 0))
+    if approve:
+        try:
+            src = json.loads(TRACK_SOURCES.read_text()) if TRACK_SOURCES.exists() else {}
+        except Exception:
+            src = {}
+        picked = []
+        for n in approve:
+            if 1 <= n <= len(items):
+                k, v = items[n - 1]
+                src[k] = v.get("url")
+                st.pop(k, None)
+                picked.append(k)
+        TRACK_SOURCES.write_text(json.dumps(src, ensure_ascii=False, indent=2))
+        save_state(st)
+        print(f"одобрено и записано в track_sources.json: {len(picked)}")
+        for k in picked:
+            print(f"   {k}")
+        print("теперь: python3 geo-unblock.py --retry review  (или обычный прогон)")
+        return
+
+    print(f"\nВ РЕВЬЮ: {len(items)}\n")
+    for i, (k, v) in enumerate(items, 1):
+        a, n = k.split(" :: ", 1)
+        want = v.get("want") or (idx.get((n, a), {}) or {}).get("Time") or 0
+        dur = v.get("cand_dur")
+        delta = f"{float(dur) - float(want):+.0f}s" if dur else "?"
+        print(f"{i:2}. {n} — {a}")
+        print(f"    хотим {want}s | кандидат {dur or '?'}s ({delta}) | score {v.get('score', 0):.0f} | {v.get('src', '?')}")
+        print(f"    «{v.get('cand')}» — {v.get('uploader')}")
+        print(f"    {v.get('url')}")
+    print("\nодобрить:  python3 geo-unblock.py --review --approve 3,11,12")
+
+
 def report(rows):
     """Human-readable summary of the run so far, read from state."""
     st = load_state()
@@ -1623,6 +1666,10 @@ def main():
     ap.add_argument("--playlist", default=None,
                     help="narrow the scan to a playlist; default is every track "
                          "Music reports as no longer available")
+    ap.add_argument("--review", action="store_true",
+                    help="list parked candidates with the evidence to judge them")
+    ap.add_argument("--approve", default=None,
+                    help="comma-separated numbers from --review to accept")
     ap.add_argument("--report", action="store_true",
                     help="print a summary of the run so far and exit")
     ap.add_argument("--repair", action="store_true",
@@ -1648,6 +1695,11 @@ def main():
 
     if a.snapshot:
         print(f"обновлено полей в индексе: {snapshot_refetched()}")
+        return
+
+    if a.review or a.approve:
+        nums = [int(x) for x in a.approve.split(",")] if a.approve else None
+        review(rows, nums)
         return
 
     if a.report:
@@ -1748,6 +1800,7 @@ def main():
             if sc < a.min_score:
                 st[key] = {"status": "review", "url": url, "score": sc, "cand": e.get("title"),
                            "uploader": e.get("uploader"), "want": want,
+                           "cand_dur": e.get("duration"), "src": prov,
                            "secs": round(time.monotonic()-t0,1)}
                 # Candidates are sorted by score, so anything after this one is
                 # worse -- there is nothing better left to try.
