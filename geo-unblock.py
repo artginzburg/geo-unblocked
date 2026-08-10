@@ -565,6 +565,84 @@ def spotify_art(row):
     return None
 
 
+UA_BROWSER = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120 Safari/537.36")
+
+# Hosts that serve release artwork. A square image from one of these is a cover;
+# a square image from anywhere else is a photograph someone chose. Note the
+# Spotify prefix: `ab67616d` is album art, while `ab676161` is an artist portrait
+# and would put a face where a sleeve belongs.
+ART_CDNS = (
+    "i.scdn.co/image/ab67616d",          # Spotify, album art only
+    "f4.bcbits.com/img", "f1.bcbits.com/img",  # Bandcamp
+    "images.genius.com",
+    "mzstatic.com/image",                 # Apple
+    "cdn-images.dzcdn.net/images/cover",  # Deezer
+    "c.saavncdn.com",                     # JioSaavn
+    "avatars.yandex.net/get-music-content",
+)
+
+
+def image_search_art(row, hint=""):
+    """Last resort: a picture search, filtered down to things that can only be
+    covers. Three conditions together, because any one alone is too weak -- the
+    image must be square, it must come from a host that serves release artwork,
+    and the result's caption must contain every word of the track title. That is
+    what separates the sleeve from the band photo and the video thumbnail sitting
+    next to it in the same results."""
+    import urllib.parse
+
+    def query(q):
+        r = subprocess.run(
+            ["curl", "-s", "-A", UA_BROWSER, "--max-time", "20",
+             "https://duckduckgo.com/?q=" + urllib.parse.quote(q) + "&iax=images&ia=images"],
+            capture_output=True, text=True, timeout=40)
+        m = re.search(r'vqd="?([\d-]+)"?', r.stdout)
+        if not m:
+            return []
+        r2 = subprocess.run(
+            ["curl", "-s", "-A", UA_BROWSER, "-H", "Referer: https://duckduckgo.com/",
+             "--max-time", "20",
+             f"https://duckduckgo.com/i.js?l=us-en&o=json&q={urllib.parse.quote(q)}"
+             f"&vqd={m.group(1)}&f=,,,&p=1"],
+            capture_output=True, text=True, timeout=40)
+        try:
+            return json.loads(r2.stdout).get("results", [])
+        except Exception:
+            return []
+
+    # The export romanises Russian artists, and a romanised query simply does not
+    # reach a cover captioned in Cyrillic. The source's own title usually carries
+    # the native spelling, so it is worth a query of its own.
+    queries = [f"{row['Artist']} {row['Name']} album cover"]
+    if hint and tokens(hint) - tokens(f"{row['Artist']} {row['Name']}"):
+        queries.append(f"{hint} album cover")
+    results = []
+    for q in queries:
+        results.extend(query(q))
+
+    want, who = tokens(row["Name"]), tokens(row["Artist"])
+    best = None
+    for x in results:
+        url, w, h = x.get("image") or "", x.get("width") or 0, x.get("height") or 0
+        cap = tokens(x.get("title") or "")
+        if not w or abs(w - h) > 2 or w < 500:
+            continue
+        if not any(c in url for c in ART_CDNS):
+            continue
+        if want and not want <= cap:
+            continue
+        # The artist has to be in the caption too. Title alone is not enough:
+        # searching "Лодка" returns a square, correctly-sized Apple cover for a
+        # different artist's song of the same name, and it looks entirely
+        # convincing until someone opens it.
+        if who and not who & cap:
+            continue
+        if best is None or w > best[0]:
+            best = (w, url)
+    return best[1] if best else None
+
+
 def artist_uploaded(uploader, row):
     """True when the upload comes from the artist themselves -- their own channel,
     or someone credited in the track title (a `feat.` collaborator). Their page
@@ -576,7 +654,7 @@ def artist_uploaded(uploader, row):
     return close(uploader, row["Artist"]) or bool(tokens(uploader) & tokens(row["Name"]))
 
 
-def get_art(row, thumb_url, uploader="", trusted_thumb=False):
+def get_art(row, thumb_url, uploader="", trusted_thumb=False, hint=""):
     art = SCRATCH / "cover.jpg"
     raw = SCRATCH / "art_raw"
     for p in (art, raw):
@@ -599,7 +677,8 @@ def get_art(row, thumb_url, uploader="", trusted_thumb=False):
 
     # 2-4. Stores first (artist+album verified), then Genius (artist+title only).
     for url, label in ((itunes_art(row), "store"), (deezer_art(row), "deezer"),
-                       (genius_art(row), "genius"), (spotify_art(row), "spotify")):
+                       (genius_art(row), "genius"), (spotify_art(row), "spotify"),
+                       (image_search_art(row, hint), "image-search")):
         if not url:
             continue
         subprocess.run(["curl", "-sL", "-o", str(raw), url], timeout=60)
@@ -620,8 +699,8 @@ def get_art(row, thumb_url, uploader="", trusted_thumb=False):
     return None, "none"
 
 
-def tag(path, row, thumb_url, src_url="", uploader="", trusted_thumb=False):
-    art, art_src = get_art(row, thumb_url, uploader, trusted_thumb)
+def tag(path, row, thumb_url, src_url="", uploader="", trusted_thumb=False, hint=""):
+    art, art_src = get_art(row, thumb_url, uploader, trusted_thumb, hint)
     if art is None:
         art = SCRATCH / "__missing__"
 
@@ -895,17 +974,22 @@ end tell'''
     return r.stdout.strip() if r.returncode == 0 else "0"
 
 
-def thumb_for(url):
+def thumb_and_title(url):
+    """One call for both: the source's image and its own title. The title is the
+    only place a Russian artist's native spelling survives -- the export has it
+    romanised -- and image search needs it to find a cover captioned in Cyrillic."""
     if not url:
-        return None
+        return None, ""
     try:
-        r = subprocess.run(["yt-dlp", url, "--print", "thumbnail", "--no-warnings",
-                            "--skip-download", "--socket-timeout", "20"],
+        r = subprocess.run(["yt-dlp", url, "--print", "thumbnail", "--print", "title",
+                            "--no-warnings", "--skip-download", "--socket-timeout", "20"],
                            capture_output=True, text=True, timeout=90)
-        t = r.stdout.strip().split("\n")[0].strip()
-        return t if t.startswith("http") else None
+        lines = [x.strip() for x in r.stdout.split("\n") if x.strip()]
     except Exception:
-        return None
+        return None, ""
+    thumb = lines[0] if lines and lines[0].startswith("http") else None
+    title = lines[1] if len(lines) > 1 else ""
+    return thumb, title
 
 
 def repair(rows, state):
@@ -939,8 +1023,10 @@ end tell'''], capture_output=True, text=True, timeout=180).stdout
         rec = state.get(f"{artist} :: {name}", {})
 
         if nart == 0:
-            art, src = get_art(row, thumb_for(rec.get("url")), rec.get("uploader") or "",
-                               trusted_thumb=rec.get("src") == "album")
+            thumb, src_title = thumb_and_title(rec.get("url"))
+            art, src = get_art(row, thumb, rec.get("uploader") or "",
+                               trusted_thumb=rec.get("src") == "album",
+                               hint=rec.get("cand") or src_title)
             if art:
                 r = subprocess.run(["osascript", "-e", f'''
 tell application "Music"
@@ -1070,7 +1156,8 @@ def main():
             art_src = tag(f, row,
                           e.get("thumbnails", [{}])[-1].get("url") if e.get("thumbnails") else None,
                           src_url=url, uploader=e.get("uploader") or "",
-                          trusted_thumb=bool(e.get("trusted_art")))
+                          trusted_thumb=bool(e.get("trusted_art")),
+                          hint=e.get("title") or "")
             # Park BEFORE importing: once our file is added Music may be mid-merge,
             # and the dead original briefly stops being findable.
             parked = park_original(row["Name"], row["Artist"])
@@ -1087,6 +1174,7 @@ def main():
             st[key] = {"status": "ok", "url": url, "src": prov, "score": sc, "art": art_src,
                        "track": tid, "parked": parked, "purged": purged,
                        "plays": plays, "uploader": e.get("uploader"),
+                       "cand": e.get("title"),
                        "secs": round(time.monotonic()-t0,1)}
             print(f"      ADDED  art={art_src} parked={parked} plays={plays} "
                   f"({time.monotonic()-t0:.0f}s)")

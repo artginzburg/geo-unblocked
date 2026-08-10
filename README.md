@@ -36,6 +36,14 @@ what Apple had, and re-imports it.
 | Genius | artist + title | no album exposed, so a weaker check; wraps art in a gold frame |
 | Spotify | artist + title | needs credentials (below); skipped silently without them |
 | source page image | uploader is the artist | a re-uploader's thumbnail is a picture *they* picked |
+| image search | square + art CDN + artist and title in caption | last resort; all three conditions, never fewer |
+
+The image-search source needs all three of its conditions at once. Any one alone
+is far too weak: searching a track title returns a square, correctly-sized Apple
+cover for a *different* artist's song of the same name, and it looks entirely
+convincing until someone opens it. It also queries using the matched source's own
+title, because the export romanises Russian artists and a romanised query never
+reaches a cover captioned in Cyrillic.
 
 A release named in `data/album_sources.json` is trusted outright — its cover *is*
 the album cover, so it bypasses the uploader check.
