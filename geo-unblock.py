@@ -1070,6 +1070,62 @@ end tell'''
     return r.stdout.strip()
 
 
+def apply_export_history(row):
+    """Write the play history recorded in the Apple export onto our new file.
+
+    This is the backstop that makes history survive regardless of what Music does
+    on import: a merge keeps it, a non-merge leaves a dead duplicate to inherit
+    from, and a destroyed entry leaves nothing at all -- but the export always
+    has the numbers. Counts are only raised, never lowered."""
+    want = int(row.get("Plays") or 0)
+    skips = int(row.get("Skips") or 0)
+    last = row.get("Last Played") or ""
+    # Composer is carried here rather than only in the file tags, so a repair pass
+    # can restore it on tracks imported before it was noticed. BPM is deliberately
+    # absent: the export has no such column and not one track in the library has it
+    # set, so there has never been anything to carry.
+    composer = (row.get("Composer") or "").strip()
+    # The favourite has no other backstop. Once an entry merges, our file IS the
+    # user's record and the only carrier of the flag -- 25 of 28 replaced tracks
+    # are in that state. Set-only, never cleared, so it stays idempotent.
+    fav = (row.get("Favorited") or "").strip().lower() == "true"
+    pre = ""
+    try:
+        d, t = last.split(", ")
+        dd, mm, yyyy = (int(x) for x in d.split("."))
+        hh, mi = (int(x) for x in t.split(":"))
+        # `current date` inside a `tell application "Music"` block is captured by
+        # Music and errors out, so build the date in plain context first.
+        pre = (f'set dt to (current date)\nset day of dt to 1\n'
+               f'set year of dt to {yyyy}\nset month of dt to {mm}\nset day of dt to {dd}\n'
+               f'set time of dt to ({hh} * hours + {mi} * minutes)\n')
+    except Exception:
+        pre = ""
+    if not want and not skips and not pre and not composer and not fav:
+        return "0"
+    esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
+    scr = pre + f'''
+tell application "Music"
+  set t to (first file track of library playlist 1 whose name is "{esc(row['Name'])}" and artist is "{esc(row['Artist'])}")
+  if {want} > (played count of t) then set (played count of t) to {want}
+  try
+    if {skips} > (skipped count of t) then set (skipped count of t) to {skips}
+  end try
+  {'try' if composer else ''}
+  {f'if (composer of t) is "" then set (composer of t) to "' + esc(composer) + '"' if composer else ''}
+  {'end try' if composer else ''}
+  {'try' if fav else ''}
+  {'if not (favorited of t) then set (favorited of t) to true' if fav else ''}
+  {'end try' if fav else ''}
+  {"try" if pre else ""}
+  {"if (played date of t) is missing value or dt > (played date of t) then set (played date of t) to dt" if pre else ""}
+  {"end try" if pre else ""}
+  return (played count of t) as text
+end tell'''
+    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=120)
+    return r.stdout.strip() if r.returncode == 0 else "0"
+
+
 def add_to_music(path):
     # The one interpolation in this file that used to go unescaped. A track
     # named `No Place for No Hero (From "Borderlands 2")` produces a path with a
@@ -1487,7 +1543,12 @@ def main():
             print(f"      ADDED  art={art_src} parked={parked} plays={plays} "
                   f"({time.monotonic()-t0:.0f}s)")
         except Exception as ex:
+            # Record whether a delete already happened. Adjacent is not atomic:
+            # if the import failed after purge_ours removed the previous copy,
+            # the track is gone and a later run must know to re-add rather than
+            # treat this as an ordinary failure.
             st[key] = {"status": "error", "url": url, "error": str(ex),
+                       "purged": locals().get("purged", "?"),
                        "secs": round(time.monotonic()-t0,1)}
             print(f"      ERROR  {ex}")
         save_state(st)
