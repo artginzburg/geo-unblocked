@@ -471,6 +471,69 @@ def genius_art(row):
     return None
 
 
+SPOTIFY_CREDS = ROOT / "data" / "spotify.json"
+_spotify_token = {}
+
+
+def spotify_token():
+    """Client-credentials token, or None when no credentials are configured.
+
+    Spotify's unofficial web-player token endpoints are blocked and their use is
+    expressly against the Developer Terms, so this goes through the documented
+    flow. Credentials come from the environment or a gitignored file -- they are
+    the user's own app credentials and never belong in the repository."""
+    if _spotify_token.get("value"):
+        return _spotify_token["value"]
+    cid = os.environ.get("SPOTIFY_CLIENT_ID")
+    secret = os.environ.get("SPOTIFY_CLIENT_SECRET")
+    if not (cid and secret) and SPOTIFY_CREDS.exists():
+        try:
+            c = json.loads(SPOTIFY_CREDS.read_text())
+            cid, secret = c.get("client_id"), c.get("client_secret")
+        except Exception:
+            return None
+    if not (cid and secret):
+        return None
+    r = subprocess.run(
+        ["curl", "-s", "--max-time", "20", "-X", "POST",
+         "https://accounts.spotify.com/api/token",
+         "-u", f"{cid}:{secret}",
+         "-d", "grant_type=client_credentials"],
+        capture_output=True, text=True, timeout=40)
+    try:
+        _spotify_token["value"] = json.loads(r.stdout)["access_token"]
+    except Exception:
+        return None
+    return _spotify_token["value"]
+
+
+def spotify_art(row):
+    """Last artwork source. Spotify carries releases the others drop entirely,
+    but exposes no reliable album for a search hit, so like Genius it is checked
+    on artist and title only -- hence its place at the end of the chain."""
+    tok = spotify_token()
+    if not tok:
+        return None
+    import urllib.parse
+    q = urllib.parse.quote(f"track:{row['Name']} artist:{row['Artist']}")
+    r = subprocess.run(
+        ["curl", "-s", "--max-time", "20", "-H", f"Authorization: Bearer {tok}",
+         f"https://api.spotify.com/v1/search?q={q}&type=track&limit=8"],
+        capture_output=True, text=True, timeout=40)
+    try:
+        items = json.loads(r.stdout)["tracks"]["items"]
+    except Exception:
+        return None
+    for it in items:
+        names = " ".join(a.get("name", "") for a in it.get("artists", []))
+        if not close(names, row["Artist"]) or not close(it.get("name", ""), row["Name"]):
+            continue
+        images = (it.get("album") or {}).get("images") or []
+        if images:
+            return max(images, key=lambda i: i.get("width") or 0)["url"]
+    return None
+
+
 def artist_uploaded(uploader, row):
     """True when the upload comes from the artist themselves -- their own channel,
     or someone credited in the track title (a `feat.` collaborator). Their page
@@ -496,7 +559,7 @@ def get_art(row, thumb_url, uploader="", trusted_thumb=False):
 
     # 2-4. Stores first (artist+album verified), then Genius (artist+title only).
     for url, label in ((itunes_art(row), "store"), (deezer_art(row), "deezer"),
-                       (genius_art(row), "genius")):
+                       (genius_art(row), "genius"), (spotify_art(row), "spotify")):
         if not url:
             continue
         subprocess.run(["curl", "-sL", "-o", str(raw), url], timeout=60)

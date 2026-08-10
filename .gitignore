@@ -6,3 +6,6 @@ data/state.json
 
 # Download staging; Music copies imports into its own Media folder
 work/
+
+# Spotify app credentials — the user's own, supplied locally
+data/spotify.json

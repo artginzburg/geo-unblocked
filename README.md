@@ -33,7 +33,26 @@ what Apple had, and re-imports it.
 | iTunes | artist + album | search by *track*; searching by album misses constantly |
 | Deezer | artist + album | catches compilations and small labels Apple dropped |
 | Genius | artist + title | no album exposed, so a weaker check; wraps art in a gold frame |
+| Spotify | artist + title | needs credentials (below); skipped silently without them |
 | source page image | uploader is the artist | a re-uploader's thumbnail is a picture *they* picked |
+
+A release named in `data/album_sources.json` is trusted outright — its cover *is*
+the album cover, so it bypasses the uploader check.
+
+### Spotify credentials
+
+Optional. Without them the source is skipped and everything else still works.
+
+Spotify blocks its unofficial web-player token endpoints and states plainly that
+using them breaches the Developer Terms, so this goes through the documented
+client-credentials flow and needs an app of your own:
+
+1. Create one at <https://developer.spotify.com/dashboard> (no redirect URI needed).
+2. Copy `data/spotify.json.example` to `data/spotify.json` and fill in the two
+   values, **or** export `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`.
+
+`data/spotify.json` is gitignored. The secret is yours; it should not be pasted
+into a chat or committed anywhere.
 
 Every cover is force-cropped to a centred square at 1200×1200. Apple itself serves
 some covers a few pixels off square, and Music renders anything non-square badly.
