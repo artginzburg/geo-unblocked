@@ -371,6 +371,14 @@ def itunes_art(row):
         for r in itunes(f"{artist} {album}", "album"):
             if close(r.get("artistName", ""), artist) and close(r.get("collectionName", ""), album):
                 return big(r["artworkUrl100"])
+
+    # Searching by title alone, verified only on duration, was tried and removed.
+    # It is tempting for entries credited to an aggregator ("Bass Boosted" and
+    # friends re-release other people's tracks), where matching on artist cannot
+    # ever succeed. But common titles defeat it: "American Funeral" returns a
+    # different artist's song 7s away from the wanted length, which passes any
+    # tolerance loose enough to also accept the aggregator cases. Those belong in
+    # data/artwork_sources.json, where a human vouches for the specific record.
     return None
 
 
