@@ -192,6 +192,7 @@ python3 geo-unblock.py --repair                        # patch already-imported 
 
 | flag | effect |
 |---|---|
+| `--snapshot` | fold favourites and counts of replaced tracks back into the index |
 | `--refresh-index` | rebuild `data/list.tsv` from Music; runs automatically if absent |
 | `--playlist NAME` | scan a playlist instead of the whole library |
 | `--dry-run` | resolve matches, download and import nothing |

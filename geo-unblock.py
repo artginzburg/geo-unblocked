@@ -195,6 +195,53 @@ end tell'''
     return live
 
 
+def snapshot_refetched():
+    """Fold the live state of already-replaced tracks back into the index.
+
+    `--refresh-index` only sees tracks Music still reports as unavailable, and a
+    successful replacement is precisely what removes that status. So anything
+    the user has since hearted or played on a replaced track exists ONLY in the
+    library — and a clean rerun starts by deleting exactly those entries. Run
+    this before anything destructive; it is what keeps a heart from vanishing.
+    Raises rather than lowers, so it can never overwrite a better value."""
+    if not LIST.exists():
+        return 0
+    out = subprocess.run(["osascript", "-e", f'''
+tell application "Music"
+  set o to ""
+  repeat with t in (every track of user playlist "{REFETCHED_PLAYLIST}")
+    set o to o & (name of t) & tab & (artist of t) & tab & (favorited of t) & tab & (played count of t) & tab & (skipped count of t) & linefeed
+  end repeat
+  return o
+end tell'''], capture_output=True, text=True, timeout=300)
+    if out.returncode != 0:
+        raise RuntimeError(f"snapshot: {out.stderr.strip()[:160]}")
+
+    rows = list(csv.DictReader(LIST.open(), delimiter="\t"))
+    by = {(r["Name"], r["Artist"]): r for r in rows}
+    changed = 0
+    for line in out.stdout.split("\n"):
+        p = line.split("\t")
+        if len(p) < 5:
+            continue
+        r = by.get((p[0], p[1]))
+        if not r:
+            continue
+        if p[2] == "true" and (r.get("Favorited") or "").lower() != "true":
+            r["Favorited"] = "true"; changed += 1
+        for col, val in (("Plays", p[3]), ("Skips", p[4])):
+            try:
+                if int(val) > int(r.get(col) or 0):
+                    r[col] = val; changed += 1
+            except ValueError:
+                pass
+    if changed:
+        with LIST.open("w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()), delimiter="\t")
+            w.writeheader(); w.writerows(rows)
+    return changed
+
+
 def load_state():
     return json.loads(STATE.read_text()) if STATE.exists() else {}
 
@@ -1504,6 +1551,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--min-score", type=float, default=120,
                     help="below this a match is parked for review, not imported")
+    ap.add_argument("--snapshot", action="store_true",
+                    help="fold favourites and counts of already-replaced tracks "
+                         "back into the index; run before anything destructive")
     ap.add_argument("--refresh-index", action="store_true",
                     help="rebuild the track list from Music (no manual export needed)")
     ap.add_argument("--playlist", default=None,
@@ -1531,6 +1581,10 @@ def main():
             return
 
     rows = [r for r in csv.DictReader(LIST.open(), delimiter="\t") if r.get("Name")]
+
+    if a.snapshot:
+        print(f"обновлено полей в индексе: {snapshot_refetched()}")
+        return
 
     if a.report:
         report(rows)

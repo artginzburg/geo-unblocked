@@ -252,6 +252,26 @@ Keep the backup **outside** `~/Music`. A few thousand audio files inside the
 media folder invite Music and LaunchServices to index them, which is its own
 class of trouble (see the stray-bundle problem in the user's global notes).
 
+## Snapshot before you destroy
+
+`--refresh-index` only sees tracks Music still reports unavailable, and a
+successful replacement is exactly what removes that status. So a heart the user
+added to an already-replaced track lives ONLY in the library — and a clean rerun
+begins by deleting those very entries. `--snapshot` folds favourites and counts
+from the refetched playlist back into the index first. It raises, never lowers.
+
+Run order for a clean pass, and not in any other order:
+
+```bash
+python3 geo-unblock.py --snapshot        # capture what only the library knows
+python3 geo-unblock.py --refresh-index   # pick up anything newly broken
+# ... then delete our imports, clear the playlists, reset state, and run
+```
+
+Measured on the first attempt at this: exactly one track (`Шприц`) was hearted
+in the library and unrecorded in the index. Without the snapshot the clean run
+would have eaten it, and nothing would have reported the loss.
+
 ## The index is the backup
 
 `data/list.tsv` is not just an input list. It holds `Plays`, `Last Played`,
