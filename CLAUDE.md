@@ -80,6 +80,11 @@ instead of what the library *holds*.
   `rating`, `comment`, `composer`, artwork via `set data of artwork 1`.
   **Not writable:** `date added`.
 - **Copying a date object between tracks fails**; a constructed date works.
+- **`before` is a reserved word** (`insert … before`). `set before to …` does not
+  compile — and the caller returned `"0"` on any non-zero exit, so a script that
+  never ran once looked exactly like "there was nothing to do". Parking was dead
+  for the entire project because of this pair. **Never let a failure and a zero
+  share a return value.**
 - **`whose` under-returns, silently.** `every track whose cloud status is no
   longer available` returned 214 tracks while walking the same library and
   comparing the status text found 215. The missing one reports `database ID`
@@ -98,6 +103,31 @@ instead of what the library *holds*.
   `minutes` as separate components and assemble them outside AppleScript.
 - Apple's own export **truncates** durations (195.906 → 195). Anything building
   an equivalent index must truncate too, or matching scores shift by a second.
+
+## Verify along the path you changed
+
+A range replace that rewrote `inherit_history` also deleted
+`apply_export_history`, which sat between it and the next function. Two call
+sites remained, so every real run would have died on `NameError`. It was
+committed because the only thing run afterwards was `--dry-run`, which never
+reaches that function. **Exercise the code path the change touches, not a
+cheaper one nearby.** `--dry-run` proves nothing about import, history or
+artwork.
+
+## Human-vouched sources are exempt from heuristics
+
+Requiring artist evidence in `score()` was right, and applying it everywhere was
+not: entries from a named release carry no uploader at all, so the check quietly
+rejected the very compilation it had been told to trust, and five tracks lost
+their artwork. Anything reached through `track_sources.json` or
+`album_sources.json` passes `vouched=True`. Demoting a human verdict is the same
+defect as forgetting it.
+
+## Order the index deterministically
+
+`--start/--limit` address rows, so any change to row order silently changes what
+a slice means. Rebuilding the index once reordered it and a 30-track run walked
+22 tracks nobody had agreed to. Sort by artist then title, always.
 
 ## Anything that runs twice must be idempotent
 

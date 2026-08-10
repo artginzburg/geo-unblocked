@@ -182,6 +182,11 @@ end tell'''
             if old.get("Name") and (old["Name"], old.get("Artist", "")) not in fresh:
                 rows.append([old.get(c, "") for c in cols])
 
+    # Deterministic order, or --start/--limit silently mean something different
+    # after every rebuild. Apple's own export is sorted by artist then title, and
+    # matching it keeps a slice stable across index sources.
+    rows.sort(key=lambda r: (norm(r[1]), norm(r[0])))
+
     LIST.parent.mkdir(parents=True, exist_ok=True)
     with LIST.open("w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
@@ -321,7 +326,7 @@ def pick_from_album(row, want_dur, min_score):
         return None
     best = None
     for e in album_entries(url):
-        sc = score(e, row["Name"], row["Artist"], want_dur)
+        sc = score(e, row["Name"], row["Artist"], want_dur, vouched=True)
         if sc is not None and (best is None or sc > best[0]):
             best = (sc, e, "album")
     return best if best and best[0] >= min_score else None
@@ -350,7 +355,7 @@ def search(query, provider, n=6):
         return []
 
 
-def score(entry, name, artist, want_dur, lenient=False):
+def score(entry, name, artist, want_dur, lenient=False, vouched=False):
     """Rank a candidate. Returns None when the duration disqualifies it.
 
     `lenient` opens the door to noticeably longer takes. It is for the second
@@ -404,7 +409,11 @@ def score(entry, name, artist, want_dur, lenient=False):
     if entry.get("album") is not None and norm(title) == norm(name):
         s += 10
 
-    if not (tokens(artist) & (tokens(uploader) | t)):
+    # Not applied to a release a human named: those entries carry no uploader at
+    # all, so the requirement would demote the very verdict it is meant to
+    # protect. Requiring artist evidence from a source that has none is how this
+    # check silently rejected a compilation it was explicitly told to trust.
+    if not vouched and not (tokens(artist) & (tokens(uploader) | t)):
         s = min(s, NO_ARTIST_CAP)
 
     # Penalise anything advertising itself as a different rendition. The duration
@@ -532,6 +541,15 @@ def itunes(term, entity):
         return []
 
 
+def base_title(name):
+    """The title without a trailing bracketed qualifier -- "(ENDRIU BOOTLEG)",
+    "(Radio Edit)", "(Vocal Mix)". Stores rarely carry a bootleg or edit under
+    its full name, so a literal query finds nothing even when the release is
+    there. Used only to widen a search; the artist and album checks still decide
+    whether the result is accepted."""
+    return re.sub(r"\s*[\(\[][^\)\]]*[\)\]]\s*$", "", name).strip() or name
+
+
 def close(a, b):
     """Loose match -- store punctuation and casing never line up exactly."""
     ta, tb = tokens(a), tokens(b)
@@ -556,6 +574,13 @@ def itunes_art(row):
         if close(r.get("artistName", ""), artist) and close(r.get("trackName", ""), row["Name"]):
             if not album or close(r.get("collectionName", ""), album):
                 return big(r["artworkUrl100"])
+
+    alt = base_title(row["Name"])
+    if alt != row["Name"]:
+        for r in itunes(f"{artist} {alt}", "song"):
+            if close(r.get("artistName", ""), artist) and close(r.get("trackName", ""), alt):
+                if not album or close(r.get("collectionName", ""), album):
+                    return big(r["artworkUrl100"])
 
     # By album: catches titles the song search fumbles (numeric names like "27").
     if album:
@@ -649,12 +674,14 @@ def deezer_art(row):
     Apple -- compilations and small labels especially."""
     import urllib.parse, urllib.request
     artist, album = row["Artist"], re.sub(r" - (Single|EP)$", "", row.get("Album") or "")
-    q = urllib.parse.quote(f'artist:"{artist}" track:"{row["Name"]}"')
-    try:
-        res = json.load(urllib.request.urlopen(
-            f"https://api.deezer.com/search?q={q}&limit=8", timeout=15)).get("data", [])
-    except Exception:
-        return None
+    res = []
+    for title in dict.fromkeys([row["Name"], base_title(row["Name"])]):
+        q = urllib.parse.quote(f'artist:"{artist}" track:"{title}"')
+        try:
+            res += json.load(urllib.request.urlopen(
+                f"https://api.deezer.com/search?q={q}&limit=8", timeout=15)).get("data", [])
+        except Exception:
+            pass
     for x in res:
         if not close(x.get("artist", {}).get("name", ""), artist):
             continue

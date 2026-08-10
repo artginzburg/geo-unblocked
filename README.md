@@ -186,9 +186,12 @@ Progress lives in `data/state.json` and every run resumes from it.
 ## Playlists
 
 - **Geo-Unblocked — refetched** — the files brought back.
-- **Geo-Unblocked — originals** — dead entries that did *not* merge and are now
-  duplicates. History has already been copied off them, so they can be deleted
-  without losing anything.
+- **Geo-Unblocked — originals** — "parking". Music usually *merges* an import
+  into the existing entry, leaving one track. When it does not, two remain: the
+  dead geoblocked one and the new file. The dead one is filed here so it can be
+  reviewed and deleted in one pass later. Its history has already been copied
+  onto the replacement, so nothing is lost by emptying this playlist — and
+  without it the duplicates would accumulate unseen.
 
 ## Requirements
 
