@@ -996,6 +996,23 @@ def artist_uploaded(uploader, row):
     return close(uploader, row["Artist"]) or bool(tokens(uploader) & tokens(row["Name"]))
 
 
+def fetch_image(url, dst, tries=3):
+    """Download an image, retrying. Every artwork source ends here, and a single
+    network blip used to cost a cover silently -- the run reported "не нашлось",
+    indistinguishable from an image that does not exist. One track lost the very
+    cover a person had named by hand, twice."""
+    for i in range(tries):
+        dst.unlink(missing_ok=True)
+        subprocess.run(["curl", "-sL", "--max-time", "30", "--retry", "2",
+                        "-o", str(dst), url], timeout=90)
+        if dst.exists() and dst.stat().st_size > 2000:
+            return True
+        if i + 1 < tries:
+            time.sleep(2)
+    dst.unlink(missing_ok=True)
+    return False
+
+
 def get_art(row, thumb_url, uploader="", trusted_thumb=False, hint=""):
     art = SCRATCH / "cover.jpg"
     raw = SCRATCH / "art_raw"
@@ -1005,8 +1022,7 @@ def get_art(row, thumb_url, uploader="", trusted_thumb=False, hint=""):
     # 0. A cover named by hand. A deliberate human choice outranks every guess.
     named = override_art(row)
     if named:
-        subprocess.run(["curl", "-sL", "-o", str(raw), named], timeout=60)
-        if raw.exists() and raw.stat().st_size > 2000 and squarify(raw, art):
+        if fetch_image(named, raw) and squarify(raw, art):
             raw.unlink(missing_ok=True)
             return art, "named"
         raw.unlink(missing_ok=True)
@@ -1024,8 +1040,7 @@ def get_art(row, thumb_url, uploader="", trusted_thumb=False, hint=""):
                        (image_search_art(row, hint), "image-search")):
         if not url:
             continue
-        subprocess.run(["curl", "-sL", "-o", str(raw), url], timeout=60)
-        if raw.exists() and raw.stat().st_size > 2000 and squarify(raw, art):
+        if fetch_image(url, raw) and squarify(raw, art):
             raw.unlink(missing_ok=True)
             return art, label
         raw.unlink(missing_ok=True)
@@ -1034,8 +1049,7 @@ def get_art(row, thumb_url, uploader="", trusted_thumb=False, hint=""):
     # themselves. A random re-uploader's thumbnail is a picture they chose, and
     # embedding it would overwrite correct art. No artwork beats wrong artwork.
     if thumb_url and (trusted_thumb or artist_uploaded(uploader, row)):
-        subprocess.run(["curl", "-sL", "-o", str(raw), thumb_url], timeout=60)
-        if raw.exists() and raw.stat().st_size > 1000 and squarify(raw, art):
+        if fetch_image(thumb_url, raw, tries=2) and squarify(raw, art):
             raw.unlink(missing_ok=True)
             return art, "source-thumb"
         raw.unlink(missing_ok=True)

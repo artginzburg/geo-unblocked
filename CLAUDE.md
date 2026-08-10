@@ -157,6 +157,20 @@ for "no cover exists".
 a slice means. Rebuilding the index once reordered it and a 30-track run walked
 22 tracks nobody had agreed to. Sort by artist then title, always.
 
+## A network failure must never look like an absence
+
+Every artwork source ends in a download, and an unretried one turns a blip into
+"не нашлось" — the same message the run prints when no cover exists anywhere.
+The two are indistinguishable in the output, so nobody investigates.
+
+This cost the same track its cover twice: a person found the link by hand, it
+was recorded in `artwork_sources.json`, and the run still reported no artwork
+because a single `curl` came back empty. `fetch_image` now retries for every
+source, and `override_art` retries its oEmbed lookup.
+
+The general rule: when something is fetched over a network, a failure and an
+absence must not produce the same result.
+
 ## Anything that runs twice must be idempotent
 
 `--repair` is expected to be run repeatedly, so every operation it performs has
