@@ -473,7 +473,12 @@ def score(entry, name, artist, want_dur, lenient=False, vouched=False):
 
 
 def pick(name, artist, want_dur, providers, album="", min_score=120):
-    """Find the best source, consulting providers strictly as fallbacks.
+    """Rank every candidate found, best first, consulting providers as fallbacks.
+
+    Returns a list rather than one winner, because a chosen source can still
+    fail to download: Mail.Ru answers search with file URLs that 404, and that
+    alone lost twelve tracks in a single pass -- each recorded as an error while
+    a perfectly good YouTube candidate sat unused in the same result set.
 
     The moment any query returns a match good enough to import unattended, the
     search stops -- no further queries, no further providers. Everything after
@@ -487,26 +492,32 @@ def pick(name, artist, want_dur, providers, album="", min_score=120):
         queries.append(f"{artist} {name} {album}")
     queries.append(name)
 
-    best, seen = None, []
+    scored, seen = {}, []
+
+    def add(e, prov, sc):
+        if sc is None:
+            return
+        key = e.get("url") or e.get("webpage_url") or id(e)
+        if key not in scored or sc > scored[key][0]:
+            scored[key] = (sc, e, prov)
+
     for prov in providers:
         for q in queries:
             for e in search(q, prov):
                 seen.append((e, prov))
-                sc = score(e, name, artist, want_dur)
-                if sc is not None and (best is None or sc > best[0]):
-                    best = (sc, e, prov)
-            if best and best[0] >= min_score:
-                return best
+                add(e, prov, score(e, name, artist, want_dur))
+            top = max(scored.values(), key=lambda x: x[0], default=None)
+            if top and top[0] >= min_score:
+                return sorted(scored.values(), key=lambda x: -x[0])
 
     # Nothing in the exact window. Fall back to the shortest take that is still
     # at least as long as the original -- rescoring what was already fetched, so
     # this costs no extra queries.
-    if best is None or best[0] < min_score:
+    top = max(scored.values(), key=lambda x: x[0], default=None)
+    if top is None or top[0] < min_score:
         for e, prov in seen:
-            sc = score(e, name, artist, want_dur, lenient=True)
-            if sc is not None and (best is None or sc > best[0]):
-                best = (sc, e, prov)
-    return best
+            add(e, prov, score(e, name, artist, want_dur, lenient=True))
+    return sorted(scored.values(), key=lambda x: -x[0])
 
 
 def safe(s):
@@ -1601,6 +1612,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--min-score", type=float, default=120,
                     help="below this a match is parked for review, not imported")
+    ap.add_argument("--retry", metavar="STATUS", default=None,
+                    help="process only rows already recorded with this status "
+                         "(error, review, not_found); far cheaper than a full walk")
     ap.add_argument("--snapshot", action="store_true",
                     help="fold favourites and counts of already-replaced tracks "
                          "back into the index; run before anything destructive")
@@ -1644,9 +1658,21 @@ def main():
         repair(rows, st)
         return
 
-    batch = rows[a.start:a.start + a.limit]
+    if a.retry:
+        # A full walk re-runs every already_live probe and re-searches every
+        # parked candidate -- minutes of work to reach a handful of rows. Select
+        # them directly instead.
+        wanted = {s.strip() for s in a.retry.split(",")}
+        batch = [r for r in rows
+                 if st.get(f"{r['Artist']} :: {r['Name']}", {}).get("status") in wanted]
+        for r in batch:
+            st.pop(f"{r['Artist']} :: {r['Name']}", None)
+        save_state(st)
+        print(f"выбрано строк со статусом {sorted(wanted)}: {len(batch)}")
+    else:
+        batch = rows[a.start:a.start + a.limit]
 
-    for i, row in enumerate(batch, start=a.start):
+    for i, row in enumerate(batch, start=(0 if a.retry else a.start)):
         key = f"{row['Artist']} :: {row['Name']}"
         if st.get(key, {}).get("status") == "ok":
             print(f"[{i}] skip (done): {key}"); continue
@@ -1670,98 +1696,108 @@ def main():
 
         # A named release beats any search: it is the actual record, not a guess
         # about which upload corresponds to it.
-        hit = (pick_from_track_source(row)
-               or pick_from_album(row, want, a.min_score)
-               or pick(
-                  row["Name"], row["Artist"], want, providers,
-                  row.get("Album", ""), a.min_score))
-        if not hit:
+        vouched = pick_from_track_source(row) or pick_from_album(row, want, a.min_score)
+        cands = [vouched] if vouched else pick(
+            row["Name"], row["Artist"], want, providers, row.get("Album", ""), a.min_score)
+        if not cands:
             st[key] = {"status": "not_found", "want": want, "secs": round(time.monotonic()-t0,1)}
             print("      NOT FOUND"); save_state(st); continue
 
-        sc, e, prov = hit
-        url = e.get("url") or e.get("webpage_url")
-        print(f"      -> [{prov} {sc:.0f}] {e.get('uploader')} | {e.get('title')} | {e.get('duration')}s")
-        # A candidate rejected only for being a few seconds long may simply carry
-        # padded silence. That is cheap to settle with evidence: fetch it and
-        # measure the sound itself. Anything still off is a different cut.
-        prefetched = None
-        off = abs((e.get("duration") or 0) - want)
-        # Run this for every wide candidate headed for review, not only ones that
-        # nearly cleared the bar: the whole point is that the score cannot decide
-        # these, so gating the evidence on the score is circular.
-        if (not a.dry_run and prov != "manual"
-                and DUR_TOLERANCE < off <= DUR_LONG_MAX and sc < a.min_score + 60):
+        # Try candidates in order. A source can rank first and still fail to
+        # deliver -- Mail.Ru answers search with file URLs that 404, which alone
+        # cost twelve tracks in one pass while usable YouTube candidates sat
+        # unused in the same result set.
+        handled = False
+        for attempt, (sc, e, prov) in enumerate(cands[:4]):
+            if attempt:
+                print(f"      пробую следующего кандидата ({attempt+1} из {min(len(cands),4)})")
+            url = e.get("url") or e.get("webpage_url")
+            print(f"      -> [{prov} {sc:.0f}] {e.get('uploader')} | {e.get('title')} | {e.get('duration')}s")
+            # A candidate rejected only for being a few seconds long may simply carry
+            # padded silence. That is cheap to settle with evidence: fetch it and
+            # measure the sound itself. Anything still off is a different cut.
+            prefetched = None
+            off = abs((e.get("duration") or 0) - want)
+            # Run this for every wide candidate headed for review, not only ones that
+            # nearly cleared the bar: the whole point is that the score cannot decide
+            # these, so gating the evidence on the score is circular.
+            if (not a.dry_run and prov != "manual"
+                    and DUR_TOLERANCE < off <= DUR_LONG_MAX and sc < a.min_score + 60):
+                try:
+                    cand = fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
+                    eff = effective_duration(cand)
+                    if eff and abs(eff - want) <= DUR_TOLERANCE:
+                        # The real gap is now known, so rescore on it rather than
+                        # patching the penalty back off an estimate.
+                        sc = score({**e, "duration": eff}, row["Name"], row["Artist"], want)
+                        print(f"      тишина по краям: чистого звука {eff:.0f}s "
+                              f"(Δ{eff - want:+.0f}s) — принято, score {sc:.0f}")
+                        prefetched = cand
+                    else:
+                        shown = f"{eff:.0f}s (Δ{eff - want:+.0f}s)" if eff else "не измерился"
+                        print(f"      чистого звука {shown} — другой монтаж")
+                        # Text must never outvote the audio: a candidate the
+                        # measurement rejected cannot stay above the import bar.
+                        sc = min(sc, a.min_score - 1)
+                        cand.unlink(missing_ok=True)
+                except Exception as ex:
+                    print(f"      проверка тишины не удалась: {str(ex)[:60]}")
+
+            # Below this, the match is a guess -- a live cut, a re-upload, a lookalike.
+            # Park it for human review instead of quietly polluting the library.
+            if sc < a.min_score:
+                st[key] = {"status": "review", "url": url, "score": sc, "cand": e.get("title"),
+                           "uploader": e.get("uploader"), "want": want,
+                           "secs": round(time.monotonic()-t0,1)}
+                # Candidates are sorted by score, so anything after this one is
+                # worse -- there is nothing better left to try.
+                print("      LOW CONFIDENCE -> review"); save_state(st); break
+            if a.dry_run:
+                st[key] = {"status": "dry", "url": url, "score": sc,
+                           "cand": e.get("title"), "uploader": e.get("uploader")}
+                save_state(st); continue
+
             try:
-                cand = fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
-                eff = effective_duration(cand)
-                if eff and abs(eff - want) <= DUR_TOLERANCE:
-                    # The real gap is now known, so rescore on it rather than
-                    # patching the penalty back off an estimate.
-                    sc = score({**e, "duration": eff}, row["Name"], row["Artist"], want)
-                    print(f"      тишина по краям: чистого звука {eff:.0f}s "
-                          f"(Δ{eff - want:+.0f}s) — принято, score {sc:.0f}")
-                    prefetched = cand
-                else:
-                    shown = f"{eff:.0f}s (Δ{eff - want:+.0f}s)" if eff else "не измерился"
-                    print(f"      чистого звука {shown} — другой монтаж")
-                    # Text must never outvote the audio: a candidate the
-                    # measurement rejected cannot stay above the import bar.
-                    sc = min(sc, a.min_score - 1)
-                    cand.unlink(missing_ok=True)
+                f = prefetched or fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
+                if not f:
+                    raise RuntimeError("no output file")
+                art_src = tag(f, row,
+                              e.get("thumbnails", [{}])[-1].get("url") if e.get("thumbnails") else None,
+                              src_url=url, uploader=e.get("uploader") or "",
+                              trusted_thumb=bool(e.get("trusted_art")),
+                              hint=e.get("title") or "")
+                # Park BEFORE importing: once our file is added Music may be mid-merge,
+                # and the dead original briefly stops being findable.
+                parked = park_original(row["Name"], row["Artist"])
+                purged = purge_ours(row["Name"], row["Artist"])
+                tid = add_to_music(f)
+                add_to_playlist(tid, REFETCHED_PLAYLIST)
+                # Only matters when the original did NOT merge; a merge already keeps
+                # the history, and inherit_history finds no dead entry to copy from.
+                inherit_history(row["Name"], row["Artist"], row.get("Album", ""))
+                plays = apply_export_history(row)
+                # Music copies imports into its own Media folder, so the staged file is
+                # now a second copy of the same audio. Drop it.
+                f.unlink(missing_ok=True)
+                st[key] = {"status": "ok", "url": url, "src": prov, "score": sc, "art": art_src,
+                           "track": tid, "parked": parked, "purged": purged,
+                           "plays": plays, "uploader": e.get("uploader"),
+                           "cand": e.get("title"),
+                           "secs": round(time.monotonic()-t0,1)}
+                print(f"      ADDED  art={art_src} parked={parked} plays={plays} "
+                      f"({time.monotonic()-t0:.0f}s)")
+                handled = True
+                break
             except Exception as ex:
-                print(f"      проверка тишины не удалась: {str(ex)[:60]}")
-
-        # Below this, the match is a guess -- a live cut, a re-upload, a lookalike.
-        # Park it for human review instead of quietly polluting the library.
-        if sc < a.min_score:
-            st[key] = {"status": "review", "url": url, "score": sc, "cand": e.get("title"),
-                       "uploader": e.get("uploader"), "want": want,
-                       "secs": round(time.monotonic()-t0,1)}
-            print("      LOW CONFIDENCE -> review"); save_state(st); continue
-        if a.dry_run:
-            st[key] = {"status": "dry", "url": url, "score": sc,
-                       "cand": e.get("title"), "uploader": e.get("uploader")}
-            save_state(st); continue
-
-        try:
-            f = prefetched or fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
-            if not f:
-                raise RuntimeError("no output file")
-            art_src = tag(f, row,
-                          e.get("thumbnails", [{}])[-1].get("url") if e.get("thumbnails") else None,
-                          src_url=url, uploader=e.get("uploader") or "",
-                          trusted_thumb=bool(e.get("trusted_art")),
-                          hint=e.get("title") or "")
-            # Park BEFORE importing: once our file is added Music may be mid-merge,
-            # and the dead original briefly stops being findable.
-            parked = park_original(row["Name"], row["Artist"])
-            purged = purge_ours(row["Name"], row["Artist"])
-            tid = add_to_music(f)
-            add_to_playlist(tid, REFETCHED_PLAYLIST)
-            # Only matters when the original did NOT merge; a merge already keeps
-            # the history, and inherit_history finds no dead entry to copy from.
-            inherit_history(row["Name"], row["Artist"], row.get("Album", ""))
-            plays = apply_export_history(row)
-            # Music copies imports into its own Media folder, so the staged file is
-            # now a second copy of the same audio. Drop it.
-            f.unlink(missing_ok=True)
-            st[key] = {"status": "ok", "url": url, "src": prov, "score": sc, "art": art_src,
-                       "track": tid, "parked": parked, "purged": purged,
-                       "plays": plays, "uploader": e.get("uploader"),
-                       "cand": e.get("title"),
-                       "secs": round(time.monotonic()-t0,1)}
-            print(f"      ADDED  art={art_src} parked={parked} plays={plays} "
-                  f"({time.monotonic()-t0:.0f}s)")
-        except Exception as ex:
-            # Record whether a delete already happened. Adjacent is not atomic:
-            # if the import failed after purge_ours removed the previous copy,
-            # the track is gone and a later run must know to re-add rather than
-            # treat this as an ordinary failure.
-            st[key] = {"status": "error", "url": url, "error": str(ex),
-                       "purged": locals().get("purged", "?"),
-                       "secs": round(time.monotonic()-t0,1)}
-            print(f"      ERROR  {ex}")
+                # Record whether a delete already happened. Adjacent is not atomic:
+                # if the import failed after purge_ours removed the previous copy,
+                # the track is gone and a later run must know to re-add rather than
+                # treat this as an ordinary failure.
+                st[key] = {"status": "error", "url": url, "error": str(ex),
+                           "purged": locals().get("purged", "?"),
+                           "secs": round(time.monotonic()-t0,1)}
+                print(f"      ERROR  {ex}")
+                # Deliberately no break: the next candidate is the whole point.
         save_state(st)
 
     ok = sum(1 for v in st.values() if v.get("status") == "ok")

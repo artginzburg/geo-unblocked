@@ -199,6 +199,7 @@ python3 geo-unblock.py --repair                        # patch already-imported 
 | `--snapshot` | fold favourites and counts of replaced tracks back into the index |
 | `--refresh-index` | rebuild `data/list.tsv` from Music; runs automatically if absent |
 | `--playlist NAME` | scan a playlist instead of the whole library |
+| `--retry STATUS` | process only rows recorded as `error`, `review` or `not_found` |
 | `--dry-run` | resolve matches, download and import nothing |
 | `--min-score` | confidence below which a match goes to review (default 120) |
 | `--no-soundcloud` | YouTube only |
