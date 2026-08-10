@@ -10,6 +10,31 @@ wrong set of territories, and a paid-for track stops playing in one country
 while remaining available in the next one over. This tool re-acquires the audio,
 tags it to match what Apple had, and re-imports it.
 
+## Getting the list of broken tracks
+
+**No export, no playlist, nothing to set up.** The tool asks Music directly for
+every track it reports as `cloud status: no longer available` — which is the
+same rule a "geoblocked" smart playlist would hold, except the rule lives on the
+track itself, so no playlist has to exist. (One could not be created anyway:
+Music's scripting interface makes plain playlists but cannot give them rules.)
+
+```bash
+python3 geo-unblock.py --refresh-index          # scan the library
+python3 geo-unblock.py --refresh-index --playlist "Some Playlist"   # narrow the scope
+```
+
+The scan runs automatically the first time if no list exists yet, takes about a
+minute on a 6500-track library, and writes `data/list.tsv`. Rerun it whenever
+the library changes; tracks already replaced drop out on their own, since they
+are no longer unavailable.
+
+`--playlist` is for scoping to a subset — a playlist you maintain by hand, or a
+smart playlist with extra conditions. Without it the whole library is scanned.
+
+An Apple **File → Library → Export Playlist** dump can still be dropped in as
+`data/list.tsv` and works unchanged, but it is no longer needed and is strictly
+worse: it has no `Favorited` column, and the favourite flag has no other backup.
+
 ## What it does per track
 
 1. **Skips what is already fine.** A geoblocked entry whose song also exists as
@@ -108,8 +133,10 @@ was: 256 AAC audio file
 The leading marker identifies the tool's own imports, so a rerun can replace
 them without touching anything of yours.
 
-**The favourite flag has no backup.** The export has no such column, so it can
-only be copied from the dead entry. If that entry is gone, the flag is gone.
+**The favourite flag is only as safe as the index.** Music's export has no such
+column, so a scan of the library is the only place it is captured. Refresh the
+index before doing anything destructive; once a dead entry is gone, a flag that
+was never indexed is gone with it.
 
 ## Quality ceiling
 
@@ -125,6 +152,7 @@ AAC loses more than the bitrate gains.
 ## Usage
 
 ```bash
+python3 geo-unblock.py --refresh-index                 # rebuild the list from Music
 python3 geo-unblock.py --start 0 --limit 30            # process a slice
 python3 geo-unblock.py --start 0 --limit 30 --dry-run  # search only, import nothing
 python3 geo-unblock.py --report                        # summarise the run so far
@@ -133,11 +161,16 @@ python3 geo-unblock.py --repair                        # patch already-imported 
 
 | flag | effect |
 |---|---|
+| `--refresh-index` | rebuild `data/list.tsv` from Music; runs automatically if absent |
+| `--playlist NAME` | scan a playlist instead of the whole library |
 | `--dry-run` | resolve matches, download and import nothing |
 | `--min-score` | confidence below which a match goes to review (default 120) |
 | `--no-soundcloud` | YouTube only |
 | `--report` | counts, sources, timings, and anything left in review |
 | `--repair` | fix artwork, history and comments on tracks already imported |
+
+The playlists the tool creates are named from `$GEO_UNBLOCKED_NAME`, default
+`Geo-Unblocked`. Set it if that clashes with something you already have.
 
 `--report` reads artwork and bitrate back out of Music rather than from the run
 log: state records what an import *intended*, and a repair changes the library

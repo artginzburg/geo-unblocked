@@ -80,8 +80,24 @@ instead of what the library *holds*.
   `rating`, `comment`, `composer`, artwork via `set data of artwork 1`.
   **Not writable:** `date added`.
 - **Copying a date object between tracks fails**; a constructed date works.
-- Listing every track property at once times out on a 6500-track library. Fetch
-  one property per call with `get <prop> of every track` and zip the columns.
+- **`whose` under-returns, silently.** `every track whose cloud status is no
+  longer available` returned 214 tracks while walking the same library and
+  comparing the status text found 215. The missing one reports `database ID`
+  10319 when enumerated and resolves to a different id when looked up, so
+  Music's own index disagrees with itself. **Never trust a `whose` filter as a
+  complete set** — bulk-read the property and walk the matching indices.
+- **A list of specifiers cannot be bulk-read.** `get name of (every track whose
+  …)` fails; only `get name of every track of <container>` works. So filtering
+  and bulk-reading cannot be combined — read the whole container, then index.
+- Per-track property reads over a whole library are slow (~50s for 15 fields on
+  215 tracks, far worse on 6500). Bulk-read what selects the subset, then read
+  fields only for the subset.
+- **Numbers and dates come back in the system locale.** `duration` arrives as
+  `195,906` with a comma. A date formats as "Wednesday, 20 December 2023 at
+  04:43:51", which no fixed parser survives — emit `year`/`month`/`day`/`hours`/
+  `minutes` as separate components and assemble them outside AppleScript.
+- Apple's own export **truncates** durations (195.906 → 195). Anything building
+  an equivalent index must truncate too, or matching scores shift by a second.
 
 ## Anything that runs twice must be idempotent
 
@@ -144,15 +160,21 @@ populate the field and the export has no column for it. Do not go looking.
 `grouping` is likewise empty everywhere. `composer` is the one that mattered: 17
 of the 241 tracks have one, and it was being dropped until noticed.
 
-## The export is a backup
+## The index is the backup
 
-`data/Geoblocked.txt` is not just an input list. It holds `Plays`, `Last
-Played`, `Skips` and `Date Added` for every track, and it is the *only*
+`data/list.tsv` is not just an input list. It holds `Plays`, `Last Played`,
+`Skips`, `Date Added` and `Favorited` for every track, and it is the *only*
 surviving record once a library entry is gone. It has already been used to
-restore history that was destroyed.
+restore history that was destroyed. **Refresh it before anything destructive.**
 
-There is no `Loved` column, so `favorited` can only come from the dead entry. If
-that entry is gone, the flag is gone with it.
+It is built by `--refresh-index`, reading Music directly: the rule behind the
+"geoblocked playlist" is a track property, so no playlist is needed — and none
+could be created, since Music's scripting interface cannot give a playlist
+rules. `--playlist NAME` narrows the scan when a subset is wanted.
+
+An Apple export dropped in at the same path still works, but is strictly worse:
+it has no `Favorited` column, and that flag has no other source. It cannot be
+recovered from anywhere once the dead entry is gone.
 
 ## Sources, in practice
 

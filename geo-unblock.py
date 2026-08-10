@@ -58,6 +58,119 @@ def tokens(s):
     return set(norm(s).split())
 
 
+PROJECT = os.environ.get("GEO_UNBLOCKED_NAME", "Geo-Unblocked")
+REPLACED_PLAYLIST_NAME = f"{PROJECT} — originals"
+REFETCHED_PLAYLIST_NAME = f"{PROJECT} — refetched"
+
+
+def build_index(playlist=None):
+    """Read the tracks to work on straight out of Music, and cache them.
+
+    The Apple export was never the point -- the rule behind it is a track
+    property, `cloud status = no longer available`, so the library can be asked
+    directly and no manual export is needed. A playlist name may still be given
+    to narrow the scope, but none is required and none has to exist: Music's
+    scripting interface cannot create a smart playlist with rules anyway.
+
+    Reading live also captures `favorited`, which the Apple export has no column
+    for -- so the snapshot this writes is a strictly better backup than the
+    export it replaces.
+
+    Dates are emitted as numeric components rather than formatted text, because
+    AppleScript renders them in the system locale and a parser keyed to one
+    locale silently mangles another."""
+    # NOT a `whose` filter. `every track whose cloud status is no longer available`
+    # silently omits tracks that genuinely carry that status -- one such track
+    # reports database ID 10319 when enumerated and resolves to a different id
+    # when looked up, and the filter never returns it. Fetching the statuses in
+    # bulk and walking the matching indices finds every one.
+    if playlist:
+        container = f'user playlist "{playlist}"'
+        gate = "true"
+        statuses = ""
+    else:
+        container = "library playlist 1"
+        # bulk-read once; per-track reads of this property over 6500 tracks are slow
+        statuses = "set statuses to (get cloud status of every track of src)"
+        gate = '((item i of statuses) as text) is "no longer available"'
+    scr = f'''
+on f(v)
+  try
+    if v is missing value then return ""
+    return v as text
+  on error
+    return ""
+  end try
+end f
+
+on dt(d)
+  try
+    if d is missing value then return ""
+    return ((year of d) as text) & "." & ((month of d as integer) as text) & "." & ¬
+           ((day of d) as text) & "." & ((hours of d) as text) & "." & ((minutes of d) as text)
+  on error
+    return ""
+  end try
+end dt
+
+tell application "Music"
+  set src to {container}
+  {statuses}
+  set o to ""
+  repeat with i from 1 to (count of tracks of src)
+    if {gate} then
+      set t to track i of src
+      set o to o & my f(name of t) & tab & my f(artist of t) & tab & my f(album of t) & tab & ¬
+        my f(genre of t) & tab & my f(year of t) & tab & my f(duration of t) & tab & ¬
+        my f(played count of t) & tab & my dt(played date of t) & tab & ¬
+        my f(skipped count of t) & tab & my dt(date added of t) & tab & ¬
+        my f(bit rate of t) & tab & my f(composer of t) & tab & my f(favorited of t) & tab & ¬
+        my f(track number of t) & tab & my f(track count of t) & linefeed
+    end if
+  end repeat
+  return o
+end tell'''
+    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=900)
+    if r.returncode != 0:
+        raise RuntimeError(f"не удалось прочитать библиотеку: {r.stderr.strip()[:200]}")
+
+    def num(x):
+        # AppleScript renders decimals in the system locale, so a comma may stand
+        # in for the point. Truncate rather than round: Apple's own export does,
+        # and an index built here has to score identically to one built from it.
+        try:
+            return str(int(float(x.replace(",", "."))))
+        except Exception:
+            return ""
+
+    def when(x):
+        try:
+            y, mo, d, h, mi = (int(v) for v in x.split("."))
+            return f"{d:02d}.{mo:02d}.{y}, {h:02d}:{mi:02d}"
+        except Exception:
+            return ""
+
+    cols = ["Name", "Artist", "Album", "Genre", "Year", "Time", "Plays", "Last Played",
+            "Skips", "Date Added", "Bit Rate", "Composer", "Favorited",
+            "Track Number", "Track Count"]
+    rows = []
+    for line in r.stdout.split("\n"):
+        p = line.split("\t")
+        if len(p) < 15 or not p[0].strip():
+            continue
+        p[5] = num(p[5])          # Time
+        p[7] = when(p[7])         # Last Played
+        p[9] = when(p[9])         # Date Added
+        rows.append(p[:15])
+
+    LIST.parent.mkdir(parents=True, exist_ok=True)
+    with LIST.open("w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(cols)
+        w.writerows(rows)
+    return len(rows)
+
+
 def load_state():
     return json.loads(STATE.read_text()) if STATE.exists() else {}
 
@@ -962,8 +1075,8 @@ def add_to_music(path):
     return r.stdout.strip()
 
 
-REPLACED_PLAYLIST = "Geo-Unblocked — originals"   # the dead Apple Music entries
-REFETCHED_PLAYLIST = "Geo-Unblocked — refetched"  # the files we brought back
+REPLACED_PLAYLIST = REPLACED_PLAYLIST_NAME    # the dead Apple Music entries
+REFETCHED_PLAYLIST = REFETCHED_PLAYLIST_NAME  # the files we brought back
 
 # Leading marker on every comment we write. It identifies our own imports so a
 # rerun can replace them without touching the user's own files, and it survives
@@ -1203,6 +1316,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--min-score", type=float, default=120,
                     help="below this a match is parked for review, not imported")
+    ap.add_argument("--refresh-index", action="store_true",
+                    help="rebuild the track list from Music (no manual export needed)")
+    ap.add_argument("--playlist", default=None,
+                    help="narrow the scan to a playlist; default is every track "
+                         "Music reports as no longer available")
     ap.add_argument("--report", action="store_true",
                     help="print a summary of the run so far and exit")
     ap.add_argument("--repair", action="store_true",
@@ -1216,6 +1334,14 @@ def main():
     DEST.mkdir(parents=True, exist_ok=True)
     ensure_playlists()
     st = load_state()
+    if a.refresh_index or not LIST.exists():
+        why = "по запросу" if a.refresh_index else "списка ещё нет"
+        print(f"читаю треки из Музыки ({why})…", flush=True)
+        n = build_index(a.playlist)
+        print(f"найдено недоступных треков: {n}")
+        if a.refresh_index and not (a.repair or a.report):
+            return
+
     rows = [r for r in csv.DictReader(LIST.open(), delimiter="\t") if r.get("Name")]
 
     if a.report:

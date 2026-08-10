@@ -1,6 +1,6 @@
 # Personal listening data: the export carries Art's full play history for every
 # track. Kept locally because the tool needs it, never committed.
-data/Geoblocked.txt
+data/Geoblocked.txt   # optional Apple export, if one is used
 data/list.tsv
 data/state.json
 
