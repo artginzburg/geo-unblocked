@@ -20,13 +20,19 @@ STATE.parent.mkdir(exist_ok=True)
 # up" edits out of the library -- title text alone is far too easy to fool.
 DUR_TOLERANCE = 4
 
-# Beyond the exact window, up to this much difference is still plausibly the same
-# recording -- a different master, or trimmed silence. Those are penalised hard so
-# they land in review rather than being imported unseen. Past this, it is a
-# different cut of the song (production music ships 30/60/90-second edits) and
-# gets dropped outright.
-DUR_WIDE = 12
+# Past the exact window the rule is asymmetric, and deliberately so: a candidate
+# SHORTER than the original is missing audio and can never be the right file,
+# while a LONGER one still contains the whole recording -- padded silence, a
+# count-in, an extended outro. Short is therefore rejected outright; long is
+# merely penalised.
+DUR_WIDE = 12          # long by this much: worth measuring the audio to settle
 WIDE_PENALTY = 45
+
+# When nothing lands in the exact window, a longer take is the correct fallback:
+# it holds every second the original had. Accepted only on the second pass, once
+# the strict pass has come up empty, and ranked so the smallest excess wins.
+DUR_LONG_MAX = 90
+LONG_PENALTY_PER_SEC = 0.25
 
 
 # The Apple export romanises Cyrillic artists ("Aleksey Vishnya") while every
@@ -59,7 +65,46 @@ def save_state(st):
     STATE.write_text(json.dumps(st, ensure_ascii=False, indent=1))
 
 
+def search_ytm(query, n=6):
+    """YouTube Music, which indexes distributor-delivered Art Tracks that plain
+    YouTube search does not surface. It also returns structured artist and album
+    fields, so a release published under a translated title still matches on who
+    made it -- that is how "Капитан Джек Воробей" turns up as "Capitán Jack
+    Sparrow". Flat results carry no duration, so each candidate costs a second
+    call; that is why this provider goes last."""
+    import urllib.parse
+    url = "https://music.youtube.com/search?q=" + urllib.parse.quote(query) + "#songs"
+    r = subprocess.run(["yt-dlp", url, "--flat-playlist", "--print", "%(id)s",
+                        "--playlist-end", str(n), "--no-warnings"],
+                       capture_output=True, text=True, timeout=120)
+    out = []
+    for vid in [x.strip() for x in r.stdout.split("\n") if x.strip()][:n]:
+        try:
+            j = subprocess.run(["yt-dlp", f"https://music.youtube.com/watch?v={vid}",
+                                "-J", "--no-warnings", "--skip-download",
+                                "--socket-timeout", "20"],
+                               capture_output=True, text=True, timeout=90)
+            d = json.loads(j.stdout)
+        except Exception:
+            continue
+        if not d.get("duration"):
+            continue
+        out.append({
+            "duration": d["duration"],
+            "title": d.get("track") or d.get("title") or "",
+            # the credited artist, not the channel -- this is the field that makes
+            # a translated title survive matching
+            "uploader": d.get("artist") or d.get("uploader") or "",
+            "album": d.get("album") or "",
+            "url": f"https://music.youtube.com/watch?v={vid}",
+            "thumbnails": d.get("thumbnails") or [],
+        })
+    return out
+
+
 def search(query, provider, n=6):
+    if provider == "ytm":
+        return search_ytm(query, n)
     if provider == "mr":
         # Mail.Ru has no search prefix, only a search URL -- and yt-dlp chokes on
         # raw Cyrillic in a URL (latin-1 encode error), so it must be escaped here.
@@ -80,16 +125,28 @@ def search(query, provider, n=6):
         return []
 
 
-def score(entry, name, artist, want_dur):
-    """Rank a candidate. Returns None when the duration disqualifies it."""
+def score(entry, name, artist, want_dur, lenient=False):
+    """Rank a candidate. Returns None when the duration disqualifies it.
+
+    `lenient` opens the door to noticeably longer takes. It is for the second
+    pass only -- reaching for one before the exact window has been exhausted
+    would swap a perfect match for a padded one."""
     dur = entry.get("duration")
-    if not dur or abs(dur - want_dur) > DUR_WIDE:
+    if not dur:
+        return None
+    diff = dur - want_dur
+    if diff < -DUR_TOLERANCE:
+        return None                      # shorter: audio the original had is gone
+    if diff <= DUR_TOLERANCE:
+        s = 100 - abs(diff) * 3
+    elif diff <= DUR_WIDE:
+        s = 100 - DUR_TOLERANCE * 3 - WIDE_PENALTY
+    elif lenient and diff <= DUR_LONG_MAX:
+        s = 100 - DUR_TOLERANCE * 3 - diff * LONG_PENALTY_PER_SEC
+    else:
         return None
     title = entry.get("title") or ""
     uploader = entry.get("uploader") or entry.get("channel") or ""
-    s = 100 - min(abs(dur - want_dur), DUR_TOLERANCE) * 3
-    if abs(dur - want_dur) > DUR_TOLERANCE:
-        s -= WIDE_PENALTY
 
     # "<Artist> - Topic" channels are the label-delivered audio YouTube generates
     # from the same masters the stores use. Always the best available source.
@@ -99,8 +156,21 @@ def score(entry, name, artist, want_dur):
         s += 25
 
     t = tokens(title)
-    s += 20 * len(t & tokens(name)) / max(len(tokens(name)), 1)
+    want_tokens = tokens(name)
+    s += 20 * len(t & want_tokens) / max(len(want_tokens), 1)
     if tokens(artist) & t:
+        s += 10
+    # Every word of the title present, not merely some. Partial overlap is weak
+    # evidence -- one shared word in a long title scores the same per-token as a
+    # complete match -- so completeness is worth calling out on its own.
+    if want_tokens and want_tokens <= t:
+        s += 12
+    # A canonical track title that equals the wanted one exactly. Only structured
+    # sources publish this field, and unlike a video headline it carries no
+    # decoration, so equality here means the release really is called that. It
+    # matters most where the export's "artist" is a compilation uploader rather
+    # than a performer, leaving the title as the only honest signal.
+    if entry.get("album") is not None and norm(title) == norm(name):
         s += 10
 
     # Penalise anything advertising itself as a different rendition. The duration
@@ -127,15 +197,25 @@ def pick(name, artist, want_dur, providers, album="", min_score=120):
         queries.append(f"{artist} {name} {album}")
     queries.append(name)
 
-    best = None
+    best, seen = None, []
     for prov in providers:
         for q in queries:
             for e in search(q, prov):
+                seen.append((e, prov))
                 sc = score(e, name, artist, want_dur)
                 if sc is not None and (best is None or sc > best[0]):
                     best = (sc, e, prov)
             if best and best[0] >= min_score:
                 return best
+
+    # Nothing in the exact window. Fall back to the shortest take that is still
+    # at least as long as the original -- rescoring what was already fetched, so
+    # this costs no extra queries.
+    if best is None or best[0] < min_score:
+        for e, prov in seen:
+            sc = score(e, name, artist, want_dur, lenient=True)
+            if sc is not None and (best is None or sc > best[0]):
+                best = (sc, e, prov)
     return best
 
 
@@ -744,7 +824,7 @@ def main():
     # YouTube first: Topic channels carry label-delivered audio. SoundCloud next,
     # then Mail.Ru -- a user-upload catalogue that is often the only place old and
     # obscure Russian material still exists.
-    providers = ["yt"] if a.no_soundcloud else ["yt", "sc", "mr"]
+    providers = ["yt"] if a.no_soundcloud else ["yt", "sc", "mr", "ytm"]
     DEST.mkdir(parents=True, exist_ok=True)
     ensure_playlists()
     st = load_state()
