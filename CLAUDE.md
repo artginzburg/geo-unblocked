@@ -69,6 +69,18 @@ that material exists at all.
 
 `- Topic` channels are label-delivered audio and outrank everything else.
 
+## Fields, and which ones are real
+
+Carried: play count, last played, skips, loved, rating, composer.
+
+**BPM is not missing — it was never there.** Zero of the 220 geoblocked entries
+and zero file tracks in the whole library have it set. Apple does not populate
+the field and the export has no column for it. Do not go looking for a way to
+carry it.
+
+`grouping` is likewise empty everywhere. `composer` is the one that mattered:
+17 of the 241 tracks have one, and it was being dropped until noticed.
+
 ## The export is a backup
 
 `data/Geoblocked.txt` is not just an input list. It holds `Plays`, `Last Played`,

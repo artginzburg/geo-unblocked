@@ -479,6 +479,7 @@ def tag(path, row, thumb_url, src_url="", uploader=""):
     for k, v in [("title", row["Name"]), ("artist", row["Artist"]),
                  ("album", row["Album"]), ("genre", row["Genre"]),
                  ("date", row["Year"]), ("album_artist", row["Artist"]),
+                 ("composer", row.get("Composer")),
                  ("comment", build_comment(row, src_url))]:
         if v:
             cmd += ["-metadata", f"{k}={v}"]
@@ -615,6 +616,11 @@ def apply_export_history(row):
     want = int(row.get("Plays") or 0)
     skips = int(row.get("Skips") or 0)
     last = row.get("Last Played") or ""
+    # Composer is carried here rather than only in the file tags, so a repair pass
+    # can restore it on tracks imported before it was noticed. BPM is deliberately
+    # absent: the export has no such column and not one track in the library has it
+    # set, so there has never been anything to carry.
+    composer = (row.get("Composer") or "").strip()
     pre = ""
     try:
         d, t = last.split(", ")
@@ -627,7 +633,7 @@ def apply_export_history(row):
                f'set time of dt to ({hh} * hours + {mi} * minutes)\n')
     except Exception:
         pre = ""
-    if not want and not skips and not pre:
+    if not want and not skips and not pre and not composer:
         return "0"
     esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
     scr = pre + f'''
@@ -637,6 +643,9 @@ tell application "Music"
   try
     if {skips} > (skipped count of t) then set (skipped count of t) to {skips}
   end try
+  {'try' if composer else ''}
+  {f'if (composer of t) is "" then set (composer of t) to "' + esc(composer) + '"' if composer else ''}
+  {'end try' if composer else ''}
   {"try" if pre else ""}
   {"set (played date of t) to dt" if pre else ""}
   {"end try" if pre else ""}
