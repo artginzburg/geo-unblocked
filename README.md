@@ -84,6 +84,14 @@ Apple's to within a second each.
 A cover in `artwork_sources.json` may be a Spotify track link; it resolves
 through Spotify's public oEmbed endpoint, which needs no account.
 
+The tool also tries to **find** such a link by itself: image-search results carry
+the page they came from, those pages are often Spotify tracks, and each is
+resolved through oEmbed and accepted only when Spotify's own title matches the
+wanted one. That is stronger than trusting the caption beside the picture, which
+routinely names a different track from the same album. It works — but search
+recall for obscure releases is poor, so naming the link by hand is still the
+reliable route for the tail.
+
 ## Artwork sources, in descending order of trust
 
 | source | verified on | notes |
@@ -95,6 +103,7 @@ through Spotify's public oEmbed endpoint, which needs no account.
 | Deezer | artist + album | catches compilations and small labels Apple dropped |
 | Genius | artist + title | no album exposed, so a weaker check; adds a gold frame |
 | Spotify | artist + title | needs credentials, see below; skipped without them |
+| Spotify, link discovered | Spotify's own title, via oEmbed | no account needed; limited by search recall |
 | source page image | uploader is the artist | a re-uploader's thumbnail is a picture *they* picked |
 | image search | square **and** art CDN **and** artist and title in the caption | last resort |
 

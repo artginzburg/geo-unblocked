@@ -136,6 +136,21 @@ Killers and Nickelback. Searching the artist's catalogue instead
 is there — while the specific release was simply not in that storefront.
 Spotify had it, reachable through oEmbed with no account.
 
+## Verified discovery beats a trusted caption
+
+Spotify covers can be reached with no account: search for the release, take the
+page URL out of the image results, resolve it through oEmbed, and accept it only
+when Spotify's own title matches. The earlier instinct — trust the caption
+printed beside the image — is what the third near-miss came from; captions
+routinely name a different track from the same album.
+
+The mechanism is verified end to end (it resolved Elvis Costello's "Beautiful"
+unaided). Its limit is DuckDuckGo's recall on obscure releases: two tracks whose
+Spotify pages exist were not surfaced at all across four query shapes and two
+result pages. Google finds them, and blocks scraping. So this source helps where
+it can and the hand-named map covers the tail — do not mistake "not found" here
+for "no cover exists".
+
 ## Order the index deterministically
 
 `--start/--limit` address rows, so any change to row order silently changes what
