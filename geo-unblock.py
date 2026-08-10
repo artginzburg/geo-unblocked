@@ -140,6 +140,44 @@ def album_entries(album_url):
     return entries
 
 
+TRACK_SOURCES = ROOT / "data" / "track_sources.json"
+
+
+def pick_from_track_source(row):
+    """A source a human approved for this exact track, keyed "Artist :: Track".
+
+    Scoring cannot rank everything: some matches are right for reasons only a
+    person can see, and those verdicts have to outlive the run that produced
+    them. Without this, a clean rerun quietly re-parks an approved track in
+    review -- and if its entry has meanwhile merged, deleting to rerun loses it
+    altogether. That is exactly how "Arasaka Tower" disappeared once."""
+    try:
+        srcs = json.loads(TRACK_SOURCES.read_text()) if TRACK_SOURCES.exists() else {}
+    except Exception:
+        return None
+    url = srcs.get(f"{row['Artist']} :: {row['Name']}")
+    if not url:
+        return None
+    r = subprocess.run(["yt-dlp", url, "-J", "--no-warnings", "--skip-download",
+                        "--socket-timeout", "30"],
+                       capture_output=True, text=True, timeout=120)
+    try:
+        d = json.loads(r.stdout)
+    except Exception:
+        return None
+    entry = {
+        "duration": d.get("duration"),
+        "title": d.get("track") or d.get("title") or row["Name"],
+        "uploader": d.get("artist") or d.get("uploader") or "",
+        "album": d.get("album") or "",
+        "url": d.get("webpage_url") or url,
+        "thumbnails": d.get("thumbnails") or ([{"url": d["thumbnail"]}] if d.get("thumbnail") else []),
+        # vouched for by a person, so its image is as trustworthy as a named release
+        "trusted_art": True,
+    }
+    return (999.0, entry, "manual")
+
+
 def pick_from_album(row, want_dur, min_score):
     """Match within a named release before falling back to searching the web."""
     try:
@@ -789,9 +827,9 @@ end tell'''
 
 def inherit_history(name, artist):
     """Carry listening history from the dead original onto our new file, so the
-    leftover duplicate can be deleted without losing anything. Play counts are
-    summed: both numbers are real plays of the same song, and the dead entry is
-    on its way out. `date added` is deliberately absent -- Music refuses writes
+    leftover duplicate can be deleted without losing anything. Counts are raised
+    to the larger of the two rather than added: this runs again on every repair
+    pass, and adding made it inflate a little more each time. `date added` is deliberately absent -- Music refuses writes
     to it, so the original add date cannot be preserved by any means."""
     esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
     scr = f'''
@@ -816,6 +854,9 @@ tell application "Music"
           end if
         end try
         try
+          if favorited of t then set deadLoved to true
+        end try
+        try
           if loved of t then set deadLoved to true
         end try
         try
@@ -829,9 +870,11 @@ tell application "Music"
   set moved to 0
   repeat with t in (every file track of library playlist 1 whose name is "{esc(name)}" and artist is "{esc(artist)}")
     try
-      set (played count of t) to ((played count of t) + deadPlays)
+      -- Take the larger, never the sum. Summing is not idempotent, and this
+      -- runs again on every repair pass: each one silently doubled the count.
+      if deadPlays > (played count of t) then set (played count of t) to deadPlays
       try
-        set (skipped count of t) to ((skipped count of t) + deadSkips)
+        if deadSkips > (skipped count of t) then set (skipped count of t) to deadSkips
       end try
       if deadDate is not missing value then
         set cur to missing value
@@ -840,7 +883,18 @@ tell application "Music"
         end try
         if cur is missing value or deadDate > cur then set (played date of t) to deadDate
       end if
-      if deadLoved then set (loved of t) to true
+      if deadLoved then
+        -- Current Music exposes this as `favorited`; `loved` errors with a
+        -- descriptor mismatch. Both are attempted because the older name is
+        -- what older versions answer to, and a wrapped failure is silent --
+        -- which is exactly why this went unnoticed: nothing was ever carried.
+        try
+          set (favorited of t) to true
+        end try
+        try
+          set (loved of t) to true
+        end try
+      end if
       if deadRating > 0 and (rating of t) is 0 then set (rating of t) to deadRating
       set moved to moved + 1
     end try
@@ -1188,8 +1242,11 @@ def main():
 
         # A named release beats any search: it is the actual record, not a guess
         # about which upload corresponds to it.
-        hit = pick_from_album(row, want, a.min_score) or pick(
-            row["Name"], row["Artist"], want, providers, row.get("Album", ""), a.min_score)
+        hit = (pick_from_track_source(row)
+               or pick_from_album(row, want, a.min_score)
+               or pick(
+                  row["Name"], row["Artist"], want, providers,
+                  row.get("Album", ""), a.min_score))
         if not hit:
             st[key] = {"status": "not_found", "want": want, "secs": round(time.monotonic()-t0,1)}
             print("      NOT FOUND"); save_state(st); continue

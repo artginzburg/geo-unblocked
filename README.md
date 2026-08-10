@@ -158,3 +158,18 @@ Counts, sources, per-track timings, and everything left in review or unfound.
 Artwork and bitrate figures are read back out of Music rather than from the run
 log — state records what an import *intended*, and a later repair changes the
 library without touching it, so reporting the intention would be a lie.
+
+## Overriding the automation
+
+Two files let a person's judgement outrank the algorithm, and both are applied
+before any search runs:
+
+| file | keyed by | for |
+|---|---|---|
+| `data/track_sources.json` | `Artist :: Track` | a source approved for one track, no score gate |
+| `data/album_sources.json` | album name | a whole release, when search cannot find it |
+
+`track_sources.json` exists because verdicts must outlive the run that produced
+them. Approving a low-scoring match by hand and then rerunning cleanly would
+re-park it in review — and if its library entry had merged in the meantime,
+deleting to rerun would lose the track entirely. That happened once.
