@@ -225,25 +225,32 @@ touches every broken track in the library, and this project has already lost
 data twice in ways nobody noticed until much later. Before running the whole
 list, take both:
 
+**Do not copy the media folder.** With an Apple Music subscription the catalogue
+re-downloads from Apple; copying it is hours of I/O for nothing. Measured here:
+of 6519 tracks, 6370 are subscription content (56.9GB) that comes back on its
+own, and only 149 are `uploaded`/`matched` — the user's own uploads and this
+tool's imports. Their files total **0.41GB in 85 items**. A blind 17GB copy was
+roughly 95% waste.
+
+Two things are irreplaceable, and both are small:
+
 ```bash
-osascript -e 'tell application "Music" to quit'   # wait for it to exit
+# 1. the library database — quit Music first, or the snapshot may be inconsistent
+osascript -e 'tell application "Music" to quit'
 ditto ~/Music/Music/"Music Library.musiclibrary" ~/Backups/music-<date>/"Music Library.musiclibrary"
 open -a Music
-rsync -a ~/Music/Music/Media.localized/ ~/Backups/music-<date>/Media/
+
+# 2. only the files Apple cannot re-serve: cloud status uploaded or matched
+#    (walk file tracks BY INDEX -- iterating a filtered list yields specifiers
+#     whose properties will not read, and a `try` around it returns nothing at all)
 ```
 
-**Quit Music first for the database.** It is the irreplaceable half — play
-counts, playlists, favourites, add dates — and copying it while Music is running
-risks an inconsistent snapshot. It is also small: ~97MB against ~17GB of media,
-so there is no excuse for skipping it.
+The database carries play counts, playlists, favourites and add dates — the part
+no download restores — at ~96MB.
 
-Keep the backup **outside** `~/Music`. A copy of thousands of `.m4a` files
-inside the media folder invites Music and LaunchServices to index them, which is
-its own class of trouble (see the stray-bundle problem in the user's global
-notes).
-
-The media copy matters less — most of it is re-downloadable — but it holds the
-user's own local files, which are not.
+Keep the backup **outside** `~/Music`. A few thousand audio files inside the
+media folder invite Music and LaunchServices to index them, which is its own
+class of trouble (see the stray-bundle problem in the user's global notes).
 
 ## The index is the backup
 

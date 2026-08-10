@@ -167,13 +167,18 @@ and the small one matters more:
 osascript -e 'tell application "Music" to quit'
 ditto ~/Music/Music/"Music Library.musiclibrary" ~/Backups/music-$(date +%F)/"Music Library.musiclibrary"
 open -a Music
-rsync -a ~/Music/Music/Media.localized/ ~/Backups/music-$(date +%F)/Media/
 ```
 
-The database holds the play counts, playlists, favourites and add dates — the
-part no download can restore — and it is ~97MB against ~17GB of audio. Quit
-Music before copying it, or the snapshot may be inconsistent. Keep the backup
-outside `~/Music` so Music does not index it.
+That is the whole backup. The database holds play counts, playlists, favourites
+and add dates — the part no download restores — and it is about 96MB.
+
+**Do not copy the media folder.** On a subscription the catalogue re-downloads
+from Apple. In this library only 149 of 6519 tracks are `uploaded` or `matched`
+(the user's own uploads plus this tool's imports) — 0.41GB against 56.9GB of
+subscription content. Back up those few files if you like; copying everything is
+hours of I/O for nothing.
+
+Keep the backup outside `~/Music` so Music does not index it.
 
 ## Usage
 
