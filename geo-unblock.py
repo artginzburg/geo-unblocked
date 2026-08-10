@@ -102,6 +102,60 @@ def search_ytm(query, n=6):
     return out
 
 
+ALBUM_SOURCES = ROOT / "data" / "album_sources.json"
+_album_cache = {}
+
+
+def album_entries(album_url):
+    """Every track of a release, listed once and reused for its whole album.
+
+    Some catalogues hold a release but cannot find it: JioSaavn carries this
+    project's production-music compilation at 320kbps, yet its search returns
+    karaoke covers for the same query. Naming the release directly sidesteps
+    search entirely -- and one entry covers all fifteen of its tracks."""
+    if album_url in _album_cache:
+        return _album_cache[album_url]
+    r = subprocess.run(
+        ["yt-dlp", album_url, "--flat-playlist", "-J", "--no-warnings",
+         "--socket-timeout", "30"],
+        capture_output=True, text=True, timeout=180)
+    try:
+        entries = json.loads(r.stdout).get("entries", []) or []
+    except Exception:
+        entries = []
+    for e in entries:
+        e.setdefault("uploader", e.get("artist") or "")
+        # yt-dlp appends a "#__youtubedl_smuggle=..." fragment to the flat url.
+        # Anything given that back chokes on it, so keep the canonical page url --
+        # the extractor re-resolves the media from it just as well.
+        if e.get("webpage_url"):
+            e["url"] = e["webpage_url"]
+        # A release we named ourselves needs no heuristic about who uploaded it:
+        # its cover IS the album cover, so mark the image as trustworthy.
+        if e.get("thumbnail"):
+            e.setdefault("thumbnails", [{"url": e["thumbnail"]}])
+        e["trusted_art"] = True
+    _album_cache[album_url] = entries
+    return entries
+
+
+def pick_from_album(row, want_dur, min_score):
+    """Match within a named release before falling back to searching the web."""
+    try:
+        sources = json.loads(ALBUM_SOURCES.read_text()) if ALBUM_SOURCES.exists() else {}
+    except Exception:
+        return None
+    url = sources.get(row.get("Album") or "")
+    if not url:
+        return None
+    best = None
+    for e in album_entries(url):
+        sc = score(e, row["Name"], row["Artist"], want_dur)
+        if sc is not None and (best is None or sc > best[0]):
+            best = (sc, e, "album")
+    return best if best and best[0] >= min_score else None
+
+
 def search(query, provider, n=6):
     if provider == "ytm":
         return search_ytm(query, n)
@@ -428,7 +482,7 @@ def artist_uploaded(uploader, row):
     return close(uploader, row["Artist"]) or bool(tokens(uploader) & tokens(row["Name"]))
 
 
-def get_art(row, thumb_url, uploader=""):
+def get_art(row, thumb_url, uploader="", trusted_thumb=False):
     art = SCRATCH / "cover.jpg"
     raw = SCRATCH / "art_raw"
     for p in (art, raw):
@@ -454,7 +508,7 @@ def get_art(row, thumb_url, uploader=""):
     # 5. Last resort: the source page image, but only when the artist posted it
     # themselves. A random re-uploader's thumbnail is a picture they chose, and
     # embedding it would overwrite correct art. No artwork beats wrong artwork.
-    if thumb_url and artist_uploaded(uploader, row):
+    if thumb_url and (trusted_thumb or artist_uploaded(uploader, row)):
         subprocess.run(["curl", "-sL", "-o", str(raw), thumb_url], timeout=60)
         if raw.exists() and raw.stat().st_size > 1000 and squarify(raw, art):
             raw.unlink(missing_ok=True)
@@ -463,8 +517,8 @@ def get_art(row, thumb_url, uploader=""):
     return None, "none"
 
 
-def tag(path, row, thumb_url, src_url="", uploader=""):
-    art, art_src = get_art(row, thumb_url, uploader)
+def tag(path, row, thumb_url, src_url="", uploader="", trusted_thumb=False):
+    art, art_src = get_art(row, thumb_url, uploader, trusted_thumb)
     if art is None:
         art = SCRATCH / "__missing__"
 
@@ -782,7 +836,8 @@ end tell'''], capture_output=True, text=True, timeout=180).stdout
         rec = state.get(f"{artist} :: {name}", {})
 
         if nart == 0:
-            art, src = get_art(row, thumb_for(rec.get("url")), rec.get("uploader") or "")
+            art, src = get_art(row, thumb_for(rec.get("url")), rec.get("uploader") or "",
+                               trusted_thumb=rec.get("src") == "album")
             if art:
                 r = subprocess.run(["osascript", "-e", f'''
 tell application "Music"
@@ -857,8 +912,10 @@ def main():
             st[key] = {"status": "already_live", "want": want, "secs": round(time.monotonic()-t0,1)}
             print("      УЖЕ ЕСТЬ живая копия — пропускаю"); save_state(st); continue
 
-        hit = pick(row["Name"], row["Artist"], want, providers,
-                   row.get("Album", ""), a.min_score)
+        # A named release beats any search: it is the actual record, not a guess
+        # about which upload corresponds to it.
+        hit = pick_from_album(row, want, a.min_score) or pick(
+            row["Name"], row["Artist"], want, providers, row.get("Album", ""), a.min_score)
         if not hit:
             st[key] = {"status": "not_found", "want": want, "secs": round(time.monotonic()-t0,1)}
             print("      NOT FOUND"); save_state(st); continue
@@ -909,7 +966,8 @@ def main():
                 raise RuntimeError("no output file")
             art_src = tag(f, row,
                           e.get("thumbnails", [{}])[-1].get("url") if e.get("thumbnails") else None,
-                          src_url=url, uploader=e.get("uploader") or "")
+                          src_url=url, uploader=e.get("uploader") or "",
+                          trusted_thumb=bool(e.get("trusted_art")))
             # Park BEFORE importing: once our file is added Music may be mid-merge,
             # and the dead original briefly stops being findable.
             parked = park_original(row["Name"], row["Artist"])
