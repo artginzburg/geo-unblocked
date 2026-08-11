@@ -15,8 +15,8 @@ tags it to match what Apple had, and re-imports it.
 **No export, no playlist, nothing to set up.** The tool asks Music directly for
 every track it reports as `cloud status: no longer available` — which is the
 same rule a "geoblocked" smart playlist would hold, except the rule lives on the
-track itself, so no playlist has to exist. (One could not be created anyway:
-Music's scripting interface makes plain playlists but cannot give them rules.)
+track itself, so no playlist has to exist. (One could not be created anyway —
+see below; making it by hand is still worth doing, for a different reason.)
 
 ```bash
 python3 geo-unblock.py --refresh-index          # scan the library
@@ -30,6 +30,27 @@ are no longer unavailable.
 
 `--playlist` is for scoping to a subset — a playlist you maintain by hand, or a
 smart playlist with extra conditions. Without it the whole library is scanned.
+
+### A standing smart playlist, worth ninety seconds of your time
+
+The tool does not need one. You probably want one anyway: geoblocking keeps
+happening, and a live playlist is the only thing that tells you it has happened
+again without your running anything. Make it once and it stays a permanent
+readout of how much is currently broken.
+
+**Music can only make it through its own interface.** In the scripting
+dictionary `smart` is read-only and no criteria property or command exists at
+all, so no script — this one or any other — can create it or add the rule.
+
+1. **File → New → Smart Playlist** (⌥⌘N).
+2. Set the one rule to **iCloud Status** · **is** · **No Longer Available**.
+3. Leave **Live updating** checked. That is the entire point of it.
+4. Name it anything; `Geoblocked` reads well in the sidebar.
+
+That rule is the same condition the tool applies when it scans, so the playlist
+and `--refresh-index` always agree. Its count going up is the signal to run
+again — and once a run finishes, what stays in it is what could not be
+rebuilt.
 
 An Apple **File → Library → Export Playlist** dump can still be dropped in as
 `data/list.tsv` and works unchanged, but it is no longer needed and is strictly

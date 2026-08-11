@@ -62,6 +62,26 @@ instead of what the library *holds*.
   match was not re-added afterwards. Inside the script it is safe, because
   delete and add are adjacent. As a standalone cleanup it is not.
 
+## The third playlist cannot be built, and the dictionary says so
+
+A live smart playlist tracking `no longer available` is the obvious companion to
+this tool — it tells the user geoblocking has struck again without their running
+anything. It cannot be created programmatically, and this is settled, not a
+matter of not having found the trick: in `com.apple.Music.sdef`, `user playlist`
+carries `smart` as `access="r"`, and there is no criteria property, no
+constructor argument and no command anywhere in the dictionary. Only the app's
+own File → New → Smart Playlist builds one.
+
+UI scripting through System Events does reach the dialog — the menu path
+resolves and the window opens as `AXDialog`. It is not worth shipping: the
+window answers to `window 1` but not to `window "Smart Playlist"`, `entire
+contents` returns nothing, and re-reading the same index raises "Invalid
+index" moments later. That is before considering that every rule name in it is
+localised. The README documents the four manual steps instead.
+
+If you open that dialog while exploring, close it (`key code 53`) before doing
+anything else. It is modal, and leaving it open freezes the user's Music.
+
 ## A read-only command must leave the library as it found it
 
 `ensure_playlists()` ran before the command was dispatched, so `--report` --
