@@ -62,6 +62,24 @@ instead of what the library *holds*.
   match was not re-added afterwards. Inside the script it is safe, because
   delete and add are adjacent. As a standalone cleanup it is not.
 
+## A read-only command must leave the library as it found it
+
+`ensure_playlists()` ran before the command was dispatched, so `--report` --
+whose entire job is to look and not touch -- recreated a playlist the user had
+deliberately deleted a minute earlier. It is now gated on the run actually
+importing something. Any command that only reads (`--report`, `--review`,
+`--dedupe` and `--retire-originals` without `--apply`, `--dry-run`) must be
+safe to run at any moment, including in the middle of deciding what to delete.
+
+Two more things about playlist descriptions, both learned by writing one:
+
+- **The field caps at 255 characters** and Music enforces it by silently
+  truncating mid-word. A description written blind reads as finished prose and
+  ends in the middle of a sentence. Read it back and count.
+- **`missing value as string` is the literal text "missing value"**, thirteen
+  characters long, so a never-set description fails an emptiness test and a
+  "write only if empty" guard never fires. Test `is missing value` first.
+
 ## Skipping the work is not skipping the bookkeeping
 
 `already_live` -- a geoblocked entry whose song also exists as a playable copy

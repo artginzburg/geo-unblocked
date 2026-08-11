@@ -1405,13 +1405,38 @@ def build_comment(row, src_url):
     return "\n".join(bits)
 
 
+PLAYLIST_NOTES = {
+    REFETCHED_PLAYLIST: "Треки, погашенные геоблоком Apple Music по ошибке дистрибьютора: "
+                        "найдены заново, скачаны, импортированы обратно — прослушивания и "
+                        "сердечки сохранены, дата добавления нет. Источник каждого — в "
+                        "комментарии трека. Собрано {date} проектом geo-unblocked.",
+    REPLACED_PLAYLIST: "Мёртвые записи Apple Music, чья замена уже стоит в библиотеке. "
+                       "История с них снята. Не опустошать вручную: после слияния ссылка "
+                       "указывает на живой трек — только --retire-originals. {date}.",
+}
+
+
 def ensure_playlists():
+    # Written only into an empty field, so a description the user wrote by hand
+    # survives every later run. The cap is 255 characters and Music enforces it
+    # by silently truncating mid-word, so these are built to fit.
+    import datetime
+    today = datetime.date.today().strftime("%d.%m.%Y")
     for p in (REPLACED_PLAYLIST, REFETCHED_PLAYLIST):
+        note = PLAYLIST_NOTES.get(p, "").format(date=today).replace('"', "'")[:255]
         subprocess.run(["osascript", "-e", f'''
 tell application "Music"
   if not (exists user playlist "{p}") then
     make new user playlist with properties {{name:"{p}"}}
   end if
+  set pl to user playlist "{p}"
+  try
+    -- `missing value as string` is the literal text "missing value", not "",
+    -- so an unset description reads as thirteen characters of content and a
+    -- naive emptiness test never writes anything.
+    set d to description of pl
+    if d is missing value or (d as string) is "" then set description of pl to "{note}"
+  end try
 end tell'''], capture_output=True, text=True, timeout=60)
 
 
@@ -1978,7 +2003,13 @@ def main():
     # obscure Russian material still exists.
     providers = ["yt"] if a.no_soundcloud else ["yt", "sc", "mr", "ytm"]
     DEST.mkdir(parents=True, exist_ok=True)
-    ensure_playlists()
+    # Only when something is actually going to be imported. Creating playlists
+    # was unconditional, so `--report` -- a command whose whole job is to look
+    # and not touch -- silently rebuilt a playlist the user had just deleted on
+    # purpose. A read-only command must leave the library exactly as it found it.
+    if not (a.report or a.review or a.approve or a.dedupe or a.retire_originals
+            or a.snapshot or a.dry_run):
+        ensure_playlists()
     st = load_state()
     # Reads the library, not the index -- it is about Music's own bookkeeping,
     # so it must run before anything insists a track list exists.
