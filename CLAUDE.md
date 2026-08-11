@@ -460,10 +460,13 @@ prints them.
 
 ## Working agreements with Art
 
-- **Do not ask about running the full 241-track pass.** It happens when Art says
-  so. The 30-track slice is the development set.
-- The target is all 30, not "most of them."
+- **Do not ask whether to run the full pass.** It happens when Art says so; a
+  slice is the development set. The target is all of the slice, not most of it.
 - One change at a time; report a latent fragility once rather than pushing it.
+- Nothing personal goes in the repository, and `.gitignore` is not evidence
+  that it did not: `git check-ignore -v <path>` is. One rule carried a trailing
+  comment, which git does not support, and 241 tracks of listening history sat
+  in the history behind a line that looked like it excluded them.
 - Commit locally so GPG signing applies. Never write files through the GitHub
   Contents API.
 - Long-running work goes in the background with a waiter. `pgrep -f "name.py"`
