@@ -1,11 +1,17 @@
-# Personal listening data: the export carries Art's full play history for every
-# track. Kept locally because the tool needs it, never committed.
-data/Geoblocked.txt   # optional Apple export, if one is used
+# Personal listening data: the export carries a full play history for every
+# track -- counts, last-played and added dates. Kept locally because the tool
+# needs it, never committed.
+#
+# Every rule here is a whole line. Git does NOT support trailing comments in
+# .gitignore: `data/Geoblocked.txt  # optional` matches a file whose name ends
+# in "  # optional" and silently protects nothing. That mistake put 241 tracks
+# of listening history into this repository's history.
+data/Geoblocked.txt
 data/list.tsv
 data/state.json
 
 # Download staging; Music copies imports into its own Media folder
 work/
 
-# Spotify app credentials — the user's own, supplied locally
+# Spotify app credentials -- the user's own, supplied locally
 data/spotify.json
