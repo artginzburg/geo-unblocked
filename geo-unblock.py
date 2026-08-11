@@ -242,6 +242,23 @@ end tell'''], capture_output=True, text=True, timeout=300)
     return changed
 
 
+def jload(text):
+    """Parse JSON from an external command, and treat anything that is not an
+    object as no answer at all.
+
+    `null` is valid JSON. A yt-dlp run that fails and prints it parses cleanly
+    into None, sails past every `except Exception` guarding these calls, and
+    then raises `'NoneType' has no attribute 'get'` several lines later. It
+    killed one full pass at track 185 of 316 and a second one on the next
+    command. **A failure that parses is the worst kind** -- the same shape as a
+    silent `try` around a write, or a script error returning zero."""
+    try:
+        d = json.loads(text)
+    except Exception:
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
 def load_state():
     return json.loads(STATE.read_text()) if STATE.exists() else {}
 
@@ -269,7 +286,7 @@ def search_ytm(query, n=6):
                                 "-J", "--no-warnings", "--skip-download",
                                 "--socket-timeout", "20"],
                                capture_output=True, text=True, timeout=90)
-            d = json.loads(j.stdout)
+            d = jload(j.stdout)
         except Exception:
             continue
         if not d.get("duration"):
@@ -305,7 +322,7 @@ def album_entries(album_url):
          "--socket-timeout", "30"],
         capture_output=True, text=True, timeout=180)
     try:
-        entries = json.loads(r.stdout).get("entries", []) or []
+        entries = jload(r.stdout).get("entries", []) or []
     except Exception:
         entries = []
     for e in entries:
@@ -346,7 +363,7 @@ def pick_from_track_source(row):
                         "--socket-timeout", "30"],
                        capture_output=True, text=True, timeout=120)
     try:
-        d = json.loads(r.stdout)
+        d = jload(r.stdout)
     except Exception:
         return None
     entry = {
@@ -396,7 +413,7 @@ def search(query, provider, n=6):
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if not out.stdout.strip():
             return []
-        entries = json.loads(out.stdout).get("entries", []) or []
+        entries = jload(out.stdout).get("entries", []) or []
         return entries[:n]
     except Exception:
         return []
@@ -538,17 +555,27 @@ def fetch(url, out_base, attempts=3):
     # keyed on artist+title, never on the url -- so a rejected download from an
     # earlier attempt would be imported and stamped with a different source.
     Path(f"{out_base}.m4a").unlink(missing_ok=True)
+    # After a few hundred downloads YouTube starts answering "Sign in to confirm
+    # you're not a bot" from this address, and the default client has no way
+    # past it. Asking as the embedded player does, and it hands over the same
+    # 130k AAC. This recovered a Topic-channel match scoring 214 -- the best
+    # candidate of the whole run -- that had been recorded as a hard error.
+    # Age-restricted videos are a different wall: only real cookies clear those.
+    variants = [cmd]
+    if "youtube.com" in url or "youtu.be" in url:
+        variants.append(cmd + ["--extractor-args", "youtube:player_client=web_embedded"])
     last = None
     for i in range(attempts):
-        try:
-            subprocess.run(cmd, check=True, timeout=600)
-            f = Path(f"{out_base}.m4a")
-            if f.exists():
-                return f
-            last = RuntimeError("yt-dlp produced no output file")
-        except Exception as ex:
-            last = ex
-            Path(f"{out_base}.m4a").unlink(missing_ok=True)
+        for variant in variants:
+            try:
+                subprocess.run(variant, check=True, timeout=600)
+                f = Path(f"{out_base}.m4a")
+                if f.exists():
+                    return f
+                last = RuntimeError("yt-dlp produced no output file")
+            except Exception as ex:
+                last = ex
+                Path(f"{out_base}.m4a").unlink(missing_ok=True)
         if i + 1 < attempts:
             print(f"      retry {i+1}/{attempts-1} после ошибки: {str(last)[:80]}", flush=True)
             time.sleep(5 * (i + 1))
@@ -701,7 +728,7 @@ def override_art(row):
              "https://open.spotify.com/oembed?url=" + url],
             capture_output=True, text=True, timeout=60)
         try:
-            thumb = json.loads(r.stdout).get("thumbnail_url")
+            thumb = jload(r.stdout).get("thumbnail_url")
         except Exception:
             thumb = None
         if thumb:
@@ -778,7 +805,7 @@ def genius_art(row):
             ["curl", "-sL", "-A", GENIUS_UA, "--max-time", "20",
              f"https://genius.com/api/search/multi?q={term}"],
             capture_output=True, text=True, timeout=40)
-        data = json.loads(r.stdout)
+        data = jload(r.stdout)
     except Exception:
         return None
     for sec in data.get("response", {}).get("sections", []):
@@ -826,7 +853,7 @@ def spotify_token():
          "-d", "grant_type=client_credentials"],
         capture_output=True, text=True, timeout=40)
     try:
-        _spotify_token["value"] = json.loads(r.stdout)["access_token"]
+        _spotify_token["value"] = jload(r.stdout)["access_token"]
     except Exception:
         return None
     return _spotify_token["value"]
@@ -846,7 +873,7 @@ def spotify_art(row):
          f"https://api.spotify.com/v1/search?q={q}&type=track&limit=8"],
         capture_output=True, text=True, timeout=40)
     try:
-        items = json.loads(r.stdout)["tracks"]["items"]
+        items = jload(r.stdout)["tracks"]["items"]
     except Exception:
         return None
     for it in items:
@@ -901,7 +928,7 @@ def image_search_art(row, hint=""):
              f"&vqd={m.group(1)}&f=,,,&p=1"],
             capture_output=True, text=True, timeout=40)
         try:
-            return json.loads(r2.stdout).get("results", [])
+            return jload(r2.stdout).get("results", [])
         except Exception:
             return []
 
@@ -974,7 +1001,7 @@ def spotify_via_search(row):
                  "https://open.spotify.com/oembed?url=" + link],
                 capture_output=True, text=True, timeout=30)
             try:
-                d = json.loads(o.stdout)
+                d = jload(o.stdout)
             except Exception:
                 continue
             if norm(d.get("title") or "") != want:
@@ -1019,7 +1046,7 @@ def spotify_via_search(row):
              f"&vqd={mm.group(1)}&f=,,,&p=1"],
             capture_output=True, text=True, timeout=40)
         try:
-            results = json.loads(r2.stdout).get("results", [])
+            results = jload(r2.stdout).get("results", [])
         except Exception:
             continue
         links = []
@@ -1892,9 +1919,11 @@ def main():
         wanted = {s.strip() for s in a.retry.split(",")}
         batch = [r for r in rows
                  if st.get(f"{r['Artist']} :: {r['Name']}", {}).get("status") in wanted]
-        for r in batch:
-            st.pop(f"{r['Artist']} :: {r['Name']}", None)
-        save_state(st)
+        # Deliberately NOT clearing the selected rows first. Doing that made the
+        # selection itself destructive: a crash mid-batch left the rows with no
+        # status at all, so the next --retry matched nothing, printed "выбрано
+        # строк: 0" and exited 0 -- indistinguishable from "there was nothing to
+        # do". The loop overwrites each row's status as it finishes anyway.
         print(f"выбрано строк со статусом {sorted(wanted)}: {len(batch)}")
     else:
         batch = rows[a.start:a.start + a.limit]
