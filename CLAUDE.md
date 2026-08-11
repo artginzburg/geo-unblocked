@@ -62,6 +62,28 @@ instead of what the library *holds*.
   match was not re-added afterwards. Inside the script it is safe, because
   delete and add are adjacent. As a standalone cleanup it is not.
 
+## Skipping the work is not skipping the bookkeeping
+
+`already_live` -- a geoblocked entry whose song also exists as a playable copy
+the user swapped in by hand -- correctly imports nothing. For the whole project
+it also *inherited* nothing, and that looked fine, because the plays and the
+favourite were still visible on the dead entry sitting right beside it.
+
+It stopped looking fine at the delete. Of sixteen dead entries with
+replacements, two had their entire record only on the corpse: Iron Maiden's
+"Wasting Love" was carrying twelve plays and a favourite the live copy did not
+have. A bulk delete would have taken both, silently, with the summary still
+reporting sixteen tidied.
+
+Two rules fell out of it, and both are now in the code:
+
+- **Any branch that returns early still owes the inheritance.** The import
+  decision and the history decision are separate questions; answering the first
+  with "nothing to do" says nothing about the second.
+- **A destructive pass verifies its own precondition, rather than trusting that
+  an earlier pass established it.** `--retire-originals` re-reads both sides and
+  raises the survivor before deleting anything. That is why the two were caught.
+
 ## Music duplicates its own subscription tracks, unprompted
 
 Not everything wrong with the library is this tool's doing, and assuming it is

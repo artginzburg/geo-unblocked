@@ -1482,6 +1482,104 @@ def thumb_and_title(url):
     return thumb, title
 
 
+def retire_originals(apply=False):
+    """Delete each dead geoblocked entry that now has a working replacement --
+    but only after the replacement provably holds at least as much history.
+
+    This is the last destructive step of the whole project and the one with no
+    undo, so it does the checking itself rather than trusting that an earlier
+    pass did. It was right not to trust: of sixteen pairs, two had never had
+    their history copied at all. Both were `already_live` -- a song the user had
+    swapped by hand at some point, where the tool correctly imported nothing and
+    therefore also inherited nothing. One of them was carrying twelve plays and
+    a favourite that a bulk delete would have taken with it.
+
+    Raise-only, never a sum: thirteen of the sixteen pairs already matched
+    exactly, and adding them would double a record that was already correct.
+    That is the opposite of `--dedupe`, where each row counted listens the
+    others did not."""
+    scr = '''tell application "Music"
+  set src to library playlist 1
+  set S to (ASCII character 1)
+  set B to (ASCII character 2)
+  set AppleScript's text item delimiters to S
+  set r to ((get name of every track of src) as text) & B
+  set r to r & ((get artist of every track of src) as text) & B
+  set r to r & ((get cloud status of every track of src) as text) & B
+  set r to r & ((get persistent ID of every track of src) as text) & B
+  set r to r & ((get played count of every track of src) as text) & B
+  set r to r & ((get skipped count of every track of src) as text) & B
+  set r to r & ((get favorited of every track of src) as text) & B
+  set r to r & ((get rating of every track of src) as text)
+  return r
+end tell'''
+    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=300)
+    if r.returncode:
+        print("не смог прочитать библиотеку:", r.stderr.strip()); return
+    cols = [b.split("\x01") for b in r.stdout.rstrip("\n").split("\x02")]
+    if len({len(c) for c in cols}) != 1:
+        print("столбцы разошлись — читать нельзя:", [len(c) for c in cols]); return
+    keys = ["name", "artist", "status", "pid", "plays", "skips", "fav", "rating"]
+    lib = [dict(zip(keys, [c[i] for c in cols])) for i in range(len(cols[0]))]
+
+    live, dead = {}, []
+    for t in lib:
+        if t["status"] == "no longer available":
+            dead.append(t)
+        else:
+            live.setdefault((norm(t["name"]), norm(t["artist"])), []).append(t)
+    pairs = [(d, max(live[(norm(d["name"]), norm(d["artist"]))], key=lambda x: int(x["plays"])))
+             for d in dead if live.get((norm(d["name"]), norm(d["artist"])))]
+    orphans = len(dead) - len(pairs)
+    if not pairs:
+        print(f"нечего убирать: мёртвых {len(dead)}, замен нет"); return
+    print(f"мёртвых записей: {len(dead)}   с готовой заменой: {len(pairs)}   останется: {orphans}")
+
+    plan = []
+    for d, l in pairs:
+        lift = {}
+        for f in ("plays", "skips", "rating"):
+            if int(d[f]) > int(l[f]):
+                lift[f] = d[f]
+        if d["fav"] == "true" and l["fav"] != "true":
+            lift["fav"] = "true"
+        plan.append((d, l, lift))
+        mark = "  <- " + ", ".join(f"{k}:{v}" for k, v in lift.items()) if lift else ""
+        print(f"  {d['artist']} — {d['name']}: {d['plays']}/{l['plays']} просл.{mark}")
+    n_lift = sum(1 for _, _, lift in plan if lift)
+    print(f"\nисторию надо дотянуть у {n_lift} из {len(plan)}")
+    if not apply:
+        print("это разбор без изменений. Чтобы применить: --retire-originals --apply")
+        return
+
+    done = 0
+    for d, l, lift in plan:
+        sets = "".join(
+            f'\n  set {p} of k to {v}' for p, v in (
+                ("played count", lift.get("plays")), ("skipped count", lift.get("skips")),
+                ("rating", lift.get("rating")),
+                ("favorited", "true" if lift.get("fav") else None)) if v)
+        # The date has to be bound to a variable: Music refuses the nested
+        # specifier form of this assignment.
+        pd = ('\n  set pdt to played date of x\n  set played date of k to pdt' if lift else "")
+        scr2 = f'''tell application "Music"
+  set k to (first track of library playlist 1 whose persistent ID is "{l['pid']}")
+  set x to (first track of library playlist 1 whose persistent ID is "{d['pid']}"){sets}
+  try{pd}
+  end try
+  delete x
+  return (count of (every track of library playlist 1 whose persistent ID is "{d['pid']}"))
+end tell'''
+        r2 = subprocess.run(["osascript", "-e", scr2], capture_output=True, text=True, timeout=300)
+        if r2.returncode:
+            print(f"ОШИБКА на {d['artist']} — {d['name']}: {r2.stderr.strip()}")
+        elif r2.stdout.strip() != "0":
+            print(f"НЕ УДАЛЕНО: {d['artist']} — {d['name']} (осталось {r2.stdout.strip()})")
+        else:
+            done += 1
+    print(f"убрано мёртвых записей: {done} из {len(plan)}")
+
+
 def dedupe(apply=False):
     """Collapse library rows that are the same recording listed more than once.
 
@@ -1869,6 +1967,8 @@ def main():
                     help="patch already-imported tracks in place instead of fetching")
     ap.add_argument("--dedupe", action="store_true",
                     help="find library rows that are the same recording twice over")
+    ap.add_argument("--retire-originals", action="store_true",
+                    help="delete dead entries whose replacement already carries their history")
     ap.add_argument("--apply", action="store_true",
                     help="with --dedupe: merge the history and delete the extra rows")
     a = ap.parse_args()
@@ -1884,6 +1984,9 @@ def main():
     # so it must run before anything insists a track list exists.
     if a.dedupe:
         dedupe(a.apply)
+        return
+    if a.retire_originals:
+        retire_originals(a.apply)
         return
     if a.refresh_index or not LIST.exists():
         why = "по запросу" if a.refresh_index else "списка ещё нет"
@@ -1947,8 +2050,24 @@ def main():
         print(f"[{i}] {key}  ({want}s)", flush=True)
 
         if not a.dry_run and already_live(row["Name"], row["Artist"]):
+            # Nothing to import, but there is still something to save. The dead
+            # entry holds the plays and the favourite; the copy the user swapped
+            # in by hand may hold neither, and the moment the dead one is
+            # deleted that history is gone. Skipping the import must not mean
+            # skipping the inheritance -- two tracks reached the delete with
+            # their record still only on the corpse, one of them carrying
+            # twelve plays and a heart.
             st[key] = {"status": "already_live", "want": want, "secs": round(time.monotonic()-t0,1)}
-            print("      УЖЕ ЕСТЬ живая копия — пропускаю"); save_state(st); continue
+            try:
+                moved = inherit_history(row["Name"], row["Artist"], row.get("Album", ""))
+                note = f" (история: {moved})" if moved else ""
+            except Exception as ex:
+                # Loudly. A history merge that fails quietly here is invisible
+                # until the dead entry is deleted, and then it is unrecoverable.
+                st[key]["history_error"] = str(ex)[:200]
+                note = f"  ⚠ история НЕ перенесена: {str(ex)[:120]}"
+            print("      УЖЕ ЕСТЬ живая копия — пропускаю" + note)
+            save_state(st); continue
 
         # A named release beats any search: it is the actual record, not a guess
         # about which upload corresponds to it.

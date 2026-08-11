@@ -207,6 +207,8 @@ python3 geo-unblock.py --repair                        # patch already-imported 
 | `--repair` | fix artwork, history and comments on tracks already imported |
 | `--dedupe` | list library rows that are the same recording twice over |
 | `--dedupe --apply` | merge their history onto the oldest row and delete the rest |
+| `--retire-originals` | list dead entries whose replacement is already in place |
+| `--retire-originals --apply` | lift any history the replacement is missing, then delete them |
 
 The playlists the tool creates are named from `$GEO_UNBLOCKED_NAME`, default
 `Geo-Unblocked`. Set it if that clashes with something you already have.
@@ -249,9 +251,15 @@ that pair is what the originals playlist is for.
 - **Geo-Unblocked — originals** — "parking". Music usually *merges* an import
   into the existing entry, leaving one track. When it does not, two remain: the
   dead geoblocked one and the new file. The dead one is filed here so it can be
-  reviewed and deleted in one pass later. Its history has already been copied
-  onto the replacement, so nothing is lost by emptying this playlist — and
-  without it the duplicates would accumulate unseen.
+  reviewed and deleted in one pass later.
+
+  Do not empty it by hand, and do not trust that it still holds what it did.
+  Once Music merges, a parked reference resolves to the *merged* track, so the
+  playlist ends up listing live music alongside corpses. Use
+  `--retire-originals`, which decides from `cloud status` rather than from
+  playlist membership, and lifts any history the replacement is missing before
+  deleting anything. When it is done, the geoblocked list holds only the tracks
+  that genuinely could not be rebuilt.
 
 ## Requirements
 
