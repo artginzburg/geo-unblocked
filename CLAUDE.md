@@ -151,6 +151,21 @@ are `.movpkg`, comment empty, `subscription`.
 
 ## AppleScript traps
 
+- **Never write to a track that is playing.** Music overwrites the metadata of
+  the current track with its own playback bookkeeping, so a scripted write lands,
+  reads back correct, and is gone a minute later. Diagnosed the long way: a
+  played count set to 52 read back as 52 and was 50 again on the next check.
+  Check `player state` and `current track` before writing, or write while
+  stopped.
+- **The snapshot-list/live-index trap bites one-off scripts too, not just
+  `build_index`.** An ad-hoc AppleScript that bulk-read `name`/`cloud status`
+  and then did `set t to track i of src` to write a play count sent the write to
+  a neighbouring track -- `Sex Bob-Omb :: Summertime` went from 38 plays to 52,
+  found only by listing tracks whose `modification date` was today. Addressing
+  by `persistent ID` cannot miss; index arithmetic can. This was written hours
+  after fixing the identical bug in `build_index`, in a throwaway snippet
+  nobody reviewed.
+
 - **`date added` is read-only.** `set date added` returns `Unknown object type`
   by every route tried. Not a bug to work around — write it into the comment.
 - **`favorited`, not `loved`.** `loved` raises a descriptor mismatch on current
@@ -192,14 +207,24 @@ are `.movpkg`, comment empty, `subscription`.
   to a later dump of durations produced a dozen convincing "same title,
   different song" findings, every one an artefact of the join. Read every
   property you intend to compare **in one call**, or key on `persistent ID`.
-  Within a single script indices are consistent, which is why `build_index`
-  works.
+  **Not even within one script, once that script is slow.** `build_index` used
+  to bulk-read `cloud status` and then resolve `track i of src` live for each
+  match — a snapshot list joined against a live index across ~60s of walking.
+  Music reorders during it. Measured 2026-08-20: one rebuild wrote four playable
+  subscription tracks into the list (Justice & Tame Impala, Nicolas Snyder,
+  Serum 114, Sevdaliza) and left out four genuinely dead ones (Bass Battle,
+  Universal Theme, Garbage Truck, Sex Bob-Omb's Threshold) — four false
+  positives and four tracks with no backup row, from one call. **A snapshot and
+  a live read are two calls no matter how they are spelled.**
 - **A list of specifiers cannot be bulk-read.** `get name of (every track whose
   …)` fails; only `get name of every track of <container>` works. So filtering
   and bulk-reading cannot be combined — read the whole container, then index.
 - Per-track property reads over a whole library are slow (~50s for 15 fields on
-  215 tracks, far worse on 6500). Bulk-read what selects the subset, then read
-  fields only for the subset.
+  215 tracks, far worse on 6500) — but the cure is **bulk-read every field you
+  will emit**, not "bulk-read the selector and then read the rest per track".
+  That halfway version is what misaligned `build_index` above. Sixteen bulk
+  reads over 6489 tracks take **1.0s**; the per-track walk they replaced took
+  ~60. Bulk is both the correct answer and the fast one.
 - **Numbers and dates come back in the system locale.** `duration` arrives as
   `195,906` with a comma. A date formats as "Wednesday, 20 December 2023 at
   04:43:51", which no fixed parser survives — emit `year`/`month`/`day`/`hours`/
@@ -226,12 +251,52 @@ their artwork. Anything reached through `track_sources.json` or
 `album_sources.json` passes `vouched=True`. Demoting a human verdict is the same
 defect as forgetting it.
 
+## The storefront is configuration, and it is not the OS region
+
+`AppleLocale` is a macOS setting. The Apple Media Services storefront follows
+the **Apple ID's country**. Reading `en_US@rg=byzzzz` as "the Belarusian store"
+ran a whole availability survey of 27 tracks against a catalogue that was not
+the user's, while his own share links said `/ge/`. Music does not expose the
+account store to AppleScript and it is in no readable preference, so it cannot
+be detected — `STORE` is an env var (`GEO_UNBLOCKED_STORE`), defaulting to `us`
+because that is what an omitted `country` has always silently meant, and 135 of
+229 covers were resolved that way.
+
+**How much the storefront actually matters, measured** on the 14 tracks still
+dead on 2026-08-20, across `ge`/`by`/`us`: 11 identical. Two apparent
+differences were HTTP 403s that rechecked as real absences. **One was genuine**
+— `Sex Bob-Omb :: No Fun (Bonus Track)`, exact artist, exact title, 134s against
+134s wanted, streamable in `us` and in no other store tried. So it is rare, real,
+and worth querying more than one store for. `itunes()` now merges the configured
+store with `us` rather than falling back when the first is empty: a storefront
+answering with the *wrong* record is not an empty answer, and `ge` does exactly
+that for this track. `limit` went 8 → 25 for the same reason — the exact match
+sat below the cut, and a truncated list reads as an absence too.
+
+Apple 403s an address that queries too fast, and keeps doing it for the rest of
+a session. Retries do not beat that, so the refusal is printed. An unlogged 403
+becomes "this record has no cover".
+
 ## A store's absence is not the artist's absence
 
 "Not in iTunes" was once read as "this artist does not reach stores" — of a
 track sitting in the user's Apple Music library, which is where the whole
 project starts. Every track here was distributed; if a lookup misses, the query
 is wrong or the storefront differs.
+
+**The library's artist is often not the store's artist**, and no
+artist-keyed query can bridge that. `No Place for No Hero (From "Borderlands
+2")` is credited in the library to `FPS Allstars`, an aggregator; the store
+publishes it as **Geek Music**, streamable, 237s against 240s. Every
+artist-keyed probe reported "not in the store" — a false statement about a track
+that was one click away, and a human found it in a browser in seconds.
+
+Dropping the artist is not the fix. Title-only queries over the same 14 tracks
+returned Mylaneil for "Time Back", Nona Hendryx for "Confidential Liar", J No
+for "Can't Do It Like Me", Vólan for "Такие дела", Secret Garden for "Sigma" —
+right title, right length, wrong song every time. The fix is to *report* a
+title+duration store candidate as something for a person to judge, never to
+accept it and never to print "not in the store" while one exists.
 
 Queries by `artist + title` fail on common words: "DJ Quads Friends" returns The
 Killers and Nickelback. Searching the artist's catalogue instead
@@ -308,6 +373,69 @@ over "add" or "append".
 
 ## Matching
 
+**A qualifier the library carries is optional unless it names a rendition.**
+`No Fun (Bonus Track)` and a source's `No Fun` are the same 134s master, but
+scoring against the full title charged the candidate for two missing words and
+left it at 119 against a bar of 120 -- the last track of that soundtrack the
+tool could not recover, for a reason that had nothing to do with the audio.
+Dropping every qualifier is the opposite mistake: strip `(8 Bit)` and a plain
+`Threshold` outscores the 8-bit arrangement the library actually holds. The
+`RENDITION` list decides which kind it is, and the same list penalises a
+candidate that advertises one.
+
+**Query the base title as well.** `pick()` built four queries and every one
+carried `(Bonus Track)`. Mail.ru returns nothing for
+`Sex Bob-Omb - No Fun (Bonus Track)` and the right 134s file for
+`Sex Bob-Omb - No Fun`, so the provider looked empty while holding the track.
+`base_title()` had existed since the beginning -- used only for store artwork
+lookups, never for audio search.
+
+**Quality cannot be ranked before downloading, so rank the source.** SoundCloud
+publishes no bitrate at all; Mail.ru publishes a wrong one -- it advertised 128
+for a file that arrived at 240. Measured over the twelve recoveries of
+2026-08-20: Mail.ru delivered 271-424kbps, SoundCloud 160-163k. Hence
+`PROVIDER_QUALITY`, deliberately small: it settles a near-tie and must never
+outweigh duration or artist. Without it `No Fun` imported at 96k while a 240k
+copy of the same master sat one rank below, against a 256k original.
+
+**When metadata cannot decide, ask the audio -- by comparing candidates to each
+other.** A radio rip with an announcer talking over the intro passed every check
+this tool has: 134.6s against 134.5s wanted (the *best* duration match of nine
+candidates, because radio pads the ends) and 245kbps. Downloading all nine and
+correlating a 200ms RMS envelope with a lag search separated them instantly:
+
+| pair | similarity |
+|---|---|
+| `Боль Новая` (mr, 241k) ↔ `Alan Lugo` (sc, 95k) | **0.92** — both the radio rip |
+| `Scott Pilgrim Music` ↔ `h3artsick`, both "Official version" | **0.93** — the clean master |
+| across the two clusters | 0.24 |
+
+Both 134s candidates the tool chose, on two separate attempts, were the same
+contaminated recording. The clean master runs 130.7s -- **3.8s shorter, so the
+duration rule actively preferred the bad one.** Two independent uploaders
+agreeing at 0.93 is evidence no title carries. Not in the code yet; the open
+questions are when to spend the downloads and what to do when the vote splits.
+
+**Measure the file that arrived. Always, not conditionally.** Every duration
+decision before the download is made on metadata the *source* supplied. The
+silence measurement used to run only when the advertised length was already
+outside tolerance — which is exactly the case where the source is being honest
+about being different. When it lies, nothing looked.
+
+What that cost: a Mail.ru entry advertised 121s against a library entry of 121s,
+carried the right artist and title, scored 142, and imported. The file was
+181KB — **12kbps, 4.4 seconds of audio**. It sat in the library as the
+replacement for a track with 50 plays until the user played it and asked what
+the hell had happened. The check now runs after every fetch, before tagging and
+before anything is parked or deleted; a mismatch raises and the loop moves to
+the next candidate. Only a `manual` source is exempt, and it prints a warning.
+
+This one was found, named, and deferred before it fired. It was written up in
+this session as "the duration gate is applied to the candidate's advertised
+length, not to the delivered file", then left alone as "a separate change" —
+and a brand-new provider was opened through it ten tracks wide the same hour.
+**A known hole is not a smaller hole for being known.**
+
 Duration is the only trustworthy signal. Titles lie constantly — "(lyrics)",
 "(Official Audio)", live rips and sped-up edits all read as the real thing. A
 live rip of Akon scored respectably on text alone and was caught only by length.
@@ -326,6 +454,27 @@ and the artwork search fold Cyrillic to Latin, and image search additionally
 queries using the source's own title, where the native spelling survives.
 
 `- Topic` channels are label-delivered audio and outrank everything else.
+
+**On SoundCloud an uploader name is self-declared, and worth nothing.** The
+`- Topic` rule works because YouTube generates those channels from label
+deliveries. SoundCloud has no equivalent: anyone may name an account anything.
+A fan cover of Sex Bob-Omb's "Threshold" was uploaded by an account literally
+named `Sex Bob-omb`, so `tokens(artist) & tokens(uploader)` matched, the length
+was 104s against 107s wanted, and it scored **148** and auto-imported. The user
+played it and said it was a cover or a home recording. `We Are Sex Bob-Omb`
+went the same way at 137, from a private account.
+
+**Engagement is the provenance SoundCloud does have, and it separated these
+cleanly.** Measured on the three imports of 2026-08-20:
+
+| upload | plays | likes | verdict |
+|---|---|---|---|
+| `Lyric McKissack` — We are sex bob-omb | 23 | 2 | amateur, removed |
+| `Martin Nebritsevsky` — sex bob omb garbage truck | 46,927 | 876 | a rip of the film audio |
+| `Two Feet` — Go Fuck Yourself | — | — | the artist's own account |
+
+Twenty-three listens is not a distributed recording. Both numbers are in the
+yt-dlp JSON already (`view_count`, `like_count`) and neither is consulted.
 
 **Verify the artist, every time.** Three near-misses came from matching a title
 and a duration and nothing else: a different artist's "Лодка" with a convincing
@@ -412,6 +561,18 @@ would have eaten it, and nothing would have reported the loss.
 
 ## The index is the backup
 
+**`purge_ours` now folds what it destroys back into the index**, because the
+`--snapshot` rule below relies on somebody remembering it, and across one long
+session nobody did. A favourite added to an import after the last snapshot lives
+in exactly one place -- that file -- and `purge_ours` is what deletes it;
+`apply_export_history` cannot restore it because it is set-only and the index
+still said `false`. `No Fun (Bonus Track)` was purged and re-imported three
+times and lost its heart on the first pass, silently. The function now reads
+`favorited` and `played count` off each track it is about to delete and raises
+the index row with them. Verified by staging the exact failure: index forced to
+`false`, favourited copy purged, index came back `true`, and the re-import
+restored the heart with no manual step.
+
 `data/list.tsv` is not just an input list. It holds `Plays`, `Last Played`,
 `Skips`, `Date Added` and `Favorited` for every track, and it is the *only*
 surviving record once a library entry is gone. It has already been used to
@@ -427,6 +588,45 @@ it has no `Favorited` column, and that flag has no other source. It cannot be
 recovered from anywhere once the dead entry is gone.
 
 ## Sources, in practice
+
+- **Mail.ru was never broken. Our URL scheme was.** For the whole project this
+  file recorded "Mail.Ru answers search with file URLs that 404" as a property
+  of the source. It cost twelve tracks in a single pass, and `pick()` returns a
+  ranked list instead of one winner specifically to survive it. The truth:
+  `moosic.my.mail.ru` serves **nothing** over plain `http` — 404 from nginx, no
+  redirect — and serves the file over `https`. Same path, same id. The first
+  one tried returned a 320kbps mp3 of exactly the right length.
+  yt-dlp is not at fault either: `mailru.py:219` is `audio_url = t['URL']`,
+  taken verbatim from Mail.ru's own API, which hands out an `http://` URL its
+  own CDN refuses. `search()` now upgrades the scheme.
+  **What it is, once reachable: a user-upload catalogue, and its tags are typed
+  by whoever uploaded.** Title, artist and duration are not the file. Searching
+  one track returned two different uploads claiming the same recording, at 121s
+  and 58s, and the 121s one held 4.4 seconds of 12kbps audio. Nine of twelve
+  recoveries came from here and nine are good — but an exact duration match from
+  Mail.ru is a match against a text field, so the delivered file decides.
+  **The lesson is the expensive part.** A source whose search returns correct,
+  exact-duration metadata and whose every file 404s is not a dead source — that
+  combination is nearly impossible. It means the link is wrong or the contract
+  changed. Zero of 221 successful imports had ever come from this provider, and
+  that number was visible the whole time; it was read as "the source is bad"
+  instead of "we have never once succeeded here, which is suspicious." **A
+  provider with a 0% delivery rate is a bug report, not a fact about the world.**
+
+- **State of the sources on 2026-08-20**, and the shape of the failures matters
+  more than the list: **YouTube** searches fine and refuses every download with
+  `playability status: LOGIN_REQUIRED` — verified across every player client
+  (`tv`, `ios`, `mweb`, `tv_embedded`, `web_safari`, `android_vr`), on videos
+  that downloaded successfully in the previous pass, on yt-dlp 2026.7.4 with
+  nothing newer in Homebrew. **YouTube Music** is the same extractor and the
+  same wall. **SoundCloud** works. **Mail.ru** works too — see below; it spent
+  this project looking dead for a reason that was ours.
+- **A PO-token provider does not fix `LOGIN_REQUIRED`.** bgutil 1.3.1 was
+  installed and works — `node build/generate_once.js` mints a valid token — but
+  yt-dlp requested one **zero** times, because the refusal lands at the
+  playability stage, before any token is relevant. PO tokens sign the request
+  for format URLs; they cannot answer a demand to sign in. Only cookies can.
+  Plugin at `~/.config/yt-dlp/plugins/`, server at `~/bgutil-ytdlp-pot-provider`.
 
 - **JioSaavn's "320" is a tier label, not a promise.** Requesting format 320
   explicitly still returned 98kbps for one track while another from the same
@@ -457,6 +657,34 @@ therefore **strict fallbacks**: stop the moment a match clears the auto-import
 threshold. Getting this wrong cost 26s per track; fixing it brought the median
 to 7s. Per-track timings live in `data/state.json` as `secs` and `--report`
 prints them.
+
+**But "found" is not "obtainable", and the early stop conflated them.** A
+provider that can search and cannot deliver turns the optimisation into a total
+loss. On 2026-08-20 YouTube answered every download with `LOGIN_REQUIRED`; a
+YouTube candidate scored 139 on the first provider, the search ended there, all
+four candidates failed to download, and the run moved on — **0 of 27 tracks
+across two full passes, while SoundCloud held downloadable copies nobody ever
+queried.** `pick()` now takes `exhaustive=True` for a second round, run only
+when every candidate failed to *download*; the gate is `not tried`, never the
+score, because a LOW CONFIDENCE reached only after the better candidates refused
+says nothing about the sources never asked.
+
+**A refusal is not a failure, and must not be retried like one.** `Sign in to
+confirm`, `Private video`, `removed by the uploader` are the source answering.
+`fetch()` raises `Refused` and stops as soon as *every* variant has refused —
+"every", because the embedded-player variant exists precisely to pass walls the
+default client hits, so one refusal is not the final word.
+
+**Drop a refusing provider from the SEARCH, not just from downloads.** Doing
+only the latter left the wall-clock almost unchanged (112s/track against 115s),
+because the cost was never the downloads. Measured per query: `yt` 1.3s, `sc`
+1.0s, `mr` 1.7s, **`ytm` 10.4s returning nothing** — it resolves each hit with a
+second call, and that call is what the wall refuses. Four queries a track made
+`ytm` alone 42s of a 104s median. Refusals are counted once in `REFUSALS`,
+shared by `search()`, `search_ytm()` and `fetch()`, and a source is out after
+three. `search()` returning `[]` now checks stderr first: an empty answer and a
+refused one are indistinguishable from the call site, and only one of them means
+the source has nothing.
 
 ## Working agreements with Art
 

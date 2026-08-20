@@ -42,6 +42,34 @@ LONG_PENALTY_PER_SEC = 0.25
 # own, and the artist bonuses were pure headroom that could never be
 # load-bearing: an unrelated performer's song of the same name auto-imported.
 NO_ARTIST_CAP = 115
+# Words that name a different rendition, not a different release position. Used
+# twice: to penalise a candidate advertising one, and to decide whether a
+# qualifier the library carries may be dropped when matching titles.
+RENDITION = ("cover", "remix", "live", "karaoke", "reaction", "sped up",
+             "slowed", "instrumental", "8d", "8 bit", "chiptune",
+             "nightcore", "lyrics video", "acoustic", "demo", "edit")
+
+# Quality cannot be ranked from search results: SoundCloud reports no bitrate at
+# all, and Mail.ru's is wrong -- it advertised 128 for a file that arrived at
+# 240. The source itself is the only signal available before downloading, and it
+# is a decent one. Measured over the twelve recoveries of 2026-08-20: Mail.ru
+# delivered 271-424kbps, SoundCloud 160-163k. Small on purpose -- this settles a
+# near-tie, it must never outweigh duration or artist evidence. Without it, "No
+# Fun" imported at 96k from SoundCloud while a 240k copy of the same 134s master
+# sat one rank below, against a library original of 256k.
+PROVIDER_QUALITY = {"mr": 4, "ytm": 3, "yt": 2, "sc": 0}
+# SoundCloud has no equivalent of a `- Topic` channel: an account name is
+# self-declared, so "uploader matches the artist" is not provenance there -- a
+# fan cover of Sex Bob-Omb's "Threshold" was posted by an account named
+# `Sex Bob-omb`, scored 148 on that basis and auto-imported. What DID separate
+# the real from the homemade, across all 19 SoundCloud candidates this project
+# has ever ranked, is duration: every one of the 12 a human accepted sits within
+# 2.19s of the library entry, and both he rejected are 2.91s and 4.41s out. A
+# rip of a released recording matches to fractions of a second; a cover never
+# does. Engagement was measured too and is NOT usable -- an accepted track by
+# The BlueStocking has 197 plays and 3 likes, fewer than a rejected one.
+SC_TIGHT = 2.5
+NO_PROVENANCE_CAP = 115
 
 
 # The Apple export romanises Cyrillic artists ("Aleksey Vishnya") while every
@@ -64,6 +92,47 @@ def norm(s):
 
 def tokens(s):
     return set(norm(s).split())
+
+
+class Refused(RuntimeError):
+    """The source answered, and the answer was no.
+
+    Kept apart from an ordinary failure because the two deserve opposite
+    treatment: a dropped fragment is worth retrying, a refusal never is."""
+
+
+# Errors that will not become a success by asking again. `Sign in to confirm`
+# covers both walls YouTube puts up -- LOGIN_REQUIRED and the age gate.
+REFUSED = re.compile(
+    r"Sign in to confirm|LOGIN_REQUIRED|Private video|members[- ]only|"
+    r"Video unavailable|removed by the uploader|has been terminated|"
+    r"not available in your country", re.I)
+
+
+# Providers that have said no this run. A refusal belongs to the source, not to
+# the track, so it is counted once and consulted everywhere -- including by the
+# SEARCH, which is where the time actually goes. Measured 2026-08-20: with
+# YouTube behind the login wall `ytm` spent 10.4s per query to return nothing,
+# because it resolves every hit with a second call the wall refuses. Four queries
+# a track made that 42s of the 104s median -- 40% of a 45-minute run that added
+# nothing. Dropping downloads alone left the wall-clock almost unchanged.
+REFUSALS = {}
+DEAD_AFTER = 3
+
+
+def note_refusal(prov, err):
+    """Record a refusal if that is what `err` is. True once the source is out."""
+    if not REFUSED.search(err or ""):
+        return False
+    REFUSALS[prov] = REFUSALS.get(prov, 0) + 1
+    if REFUSALS[prov] == DEAD_AFTER:
+        print(f"      {prov}: отказ №{DEAD_AFTER} — исключаю источник "
+              f"до конца прогона", flush=True)
+    return REFUSALS[prov] >= DEAD_AFTER
+
+
+def out_of_play(prov):
+    return REFUSALS.get(prov, 0) >= DEAD_AFTER
 
 
 PROJECT = os.environ.get("GEO_UNBLOCKED_NAME", "Geo-Unblocked")
@@ -92,13 +161,23 @@ def build_index(playlist=None):
     # reports database ID 10319 when enumerated and resolves to a different id
     # when looked up, and the filter never returns it. Fetching the statuses in
     # bulk and walking the matching indices finds every one.
+    #
+    # EVERY field is bulk-read, not just the one that selects the subset. Reading
+    # `name of t` per matching track looked like the cheap half of that rule, but
+    # `statuses` is a snapshot while `track i of src` resolves live, and the walk
+    # took ~60s on 6500 tracks -- long enough for Music to reorder underneath it.
+    # The two then address different songs. Measured on 2026-08-20: one rebuild
+    # wrote four playable subscription tracks into the list (Justice & Tame
+    # Impala, Nicolas Snyder, Serum 114, Sevdaliza) and omitted four genuinely
+    # dead ones (Bass Battle, Universal Theme, Garbage Truck, Sex Bob-Omb's
+    # Threshold) -- so four tracks had no backup row at all. Sixteen bulk reads
+    # are consistent with each other AND take 1.0s instead of 60.
     if playlist:
         container = f'user playlist "{playlist}"'
         gate = "true"
         statuses = ""
     else:
         container = "library playlist 1"
-        # bulk-read once; per-track reads of this property over 6500 tracks are slow
         statuses = "set statuses to (get cloud status of every track of src)"
         gate = '((item i of statuses) as text) is "no longer available"'
     scr = f'''
@@ -124,16 +203,30 @@ end dt
 tell application "Music"
   set src to {container}
   {statuses}
+  set nms to (get name of every track of src)
+  set ars to (get artist of every track of src)
+  set als to (get album of every track of src)
+  set gns to (get genre of every track of src)
+  set yrs to (get year of every track of src)
+  set drs to (get duration of every track of src)
+  set pcs to (get played count of every track of src)
+  set pds to (get played date of every track of src)
+  set sks to (get skipped count of every track of src)
+  set das to (get date added of every track of src)
+  set brs to (get bit rate of every track of src)
+  set cps to (get composer of every track of src)
+  set fvs to (get favorited of every track of src)
+  set tns to (get track number of every track of src)
+  set tcs to (get track count of every track of src)
   set o to ""
-  repeat with i from 1 to (count of tracks of src)
+  repeat with i from 1 to (count of nms)
     if {gate} then
-      set t to track i of src
-      set o to o & my f(name of t) & tab & my f(artist of t) & tab & my f(album of t) & tab & ¬
-        my f(genre of t) & tab & my f(year of t) & tab & my f(duration of t) & tab & ¬
-        my f(played count of t) & tab & my dt(played date of t) & tab & ¬
-        my f(skipped count of t) & tab & my dt(date added of t) & tab & ¬
-        my f(bit rate of t) & tab & my f(composer of t) & tab & my f(favorited of t) & tab & ¬
-        my f(track number of t) & tab & my f(track count of t) & linefeed
+      set o to o & my f(item i of nms) & tab & my f(item i of ars) & tab & my f(item i of als) & tab & ¬
+        my f(item i of gns) & tab & my f(item i of yrs) & tab & my f(item i of drs) & tab & ¬
+        my f(item i of pcs) & tab & my dt(item i of pds) & tab & ¬
+        my f(item i of sks) & tab & my dt(item i of das) & tab & ¬
+        my f(item i of brs) & tab & my f(item i of cps) & tab & my f(item i of fvs) & tab & ¬
+        my f(item i of tns) & tab & my f(item i of tcs) & linefeed
     end if
   end repeat
   return o
@@ -279,6 +372,7 @@ def search_ytm(query, n=6):
     r = subprocess.run(["yt-dlp", url, "--flat-playlist", "--print", "%(id)s",
                         "--playlist-end", str(n), "--no-warnings"],
                        capture_output=True, text=True, timeout=120)
+    note_refusal("ytm", r.stderr)
     out = []
     for vid in [x.strip() for x in r.stdout.split("\n") if x.strip()][:n]:
         try:
@@ -290,6 +384,10 @@ def search_ytm(query, n=6):
         except Exception:
             continue
         if not d.get("duration"):
+            # Each hit costs a second call, and it is that call the wall refuses.
+            # Left uncounted, this provider burns ten seconds a query forever.
+            if note_refusal("ytm", j.stderr):
+                break
             continue
         out.append({
             "duration": d["duration"],
@@ -412,14 +510,28 @@ def search(query, provider, n=6):
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if not out.stdout.strip():
+            # An empty answer and a refused one look identical from here, and
+            # only one of them means "this source has nothing".
+            note_refusal(provider, out.stderr)
             return []
         entries = jload(out.stdout).get("entries", []) or []
+        for e in entries:
+            # yt-dlp's mailru extractor hands back an `http://` file URL, and
+            # moosic.my.mail.ru serves NOTHING over plain http -- 404, with no
+            # redirect to follow. Over https the same path returns the file: a
+            # 320kbps mp3, right title, right duration. This was recorded in
+            # CLAUDE.md for months as "Mail.Ru answers search with file URLs
+            # that 404", a property of the source; it cost twelve tracks in one
+            # pass and made the provider look dead. It was the scheme.
+            u = e.get("url") or ""
+            if u.startswith("http://moosic.my.mail.ru/"):
+                e["url"] = "https://" + u[len("http://"):]
         return entries[:n]
     except Exception:
         return []
 
 
-def score(entry, name, artist, want_dur, lenient=False, vouched=False):
+def score(entry, name, artist, want_dur, lenient=False, vouched=False, provider=None):
     """Rank a candidate. Returns None when the duration disqualifies it.
 
     `lenient` opens the door to noticeably longer takes. It is for the second
@@ -452,11 +564,24 @@ def score(entry, name, artist, want_dur, lenient=False, vouched=False):
     # unrelated song on any "… - Topic" channel scored 160 and auto-imported.
     if uploader.endswith("- Topic") and close(uploader, artist):
         s += 60
-    if tokens(artist) & tokens(uploader):
+    if tokens(artist) & tokens(uploader) and provider != "sc":
         s += 25
 
     t = tokens(title)
     want_tokens = tokens(name)
+    # A trailing qualifier the library carries and the source omits only matters
+    # when it names a different RECORDING. "(Bonus Track)" is a position on a
+    # release: "Sex Bob-Omb - No Fun" is the same 134s master as the library's
+    # "No Fun (Bonus Track)", but scoring against the full title charged it for
+    # two missing words and left it at 119 against a bar of 120 -- the only
+    # track of that soundtrack this tool could not recover. "(8 Bit)" is the
+    # opposite: drop it and a plain "Threshold" outscores the 8-bit arrangement
+    # the library actually holds. So the rendition list decides which it is.
+    base = base_title(name)
+    if base != name:
+        qual = norm(name)[len(norm(base)):].strip()
+        if qual and not any(b in qual for b in RENDITION):
+            want_tokens = tokens(base)
     s += 20 * len(t & want_tokens) / max(len(want_tokens), 1)
     if tokens(artist) & t:
         s += 10
@@ -479,23 +604,36 @@ def score(entry, name, artist, want_dur, lenient=False, vouched=False):
     # check silently rejected a compilation it was explicitly told to trust.
     if not vouched and not (tokens(artist) & (tokens(uploader) | t)):
         s = min(s, NO_ARTIST_CAP)
+    # A source with nothing behind the name has to earn it on the clock instead.
+    if provider == "sc" and not vouched and abs(diff) > SC_TIGHT:
+        s = min(s, NO_PROVENANCE_CAP)
+    s += PROVIDER_QUALITY.get(provider, 0)
 
     # Penalise anything advertising itself as a different rendition. The duration
     # gate catches most of these, but remasters and edits can match on length.
-    for bad in ("cover", "remix", "live", "karaoke", "reaction", "sped up",
-                "slowed", "instrumental", "8d", "nightcore", "lyrics video"):
-        if bad in title.lower() and bad not in name.lower():
+    # Hyphens are normalised on BOTH sides: a candidate spelled "8-bit version"
+    # against a wanted "Threshold (8 Bit)" would otherwise be punished for
+    # matching, and one spelled "8-bit" against a plain "Threshold" would slip
+    # through. That second case is not hypothetical -- "Sex Bob-omb - Threshold
+    # (8-bit version)" scored 133 and imported over the band's own recording,
+    # 110s against 107s wanted, while the 8-bit arrangement sits in this very
+    # library as a separate track by Brian LeBarton. `8d` was in this list and
+    # `8 bit` was not.
+    tl, nl = title.lower().replace("-", " "), name.lower().replace("-", " ")
+    for bad in RENDITION:
+        if bad in tl and bad not in nl:
             s -= 45
     return s
 
 
-def pick(name, artist, want_dur, providers, album="", min_score=120):
+def pick(name, artist, want_dur, providers, album="", min_score=120, exhaustive=False):
     """Rank every candidate found, best first, consulting providers as fallbacks.
 
     Returns a list rather than one winner, because a chosen source can still
-    fail to download: Mail.Ru answers search with file URLs that 404, and that
-    alone lost twelve tracks in a single pass -- each recorded as an error while
-    a perfectly good YouTube candidate sat unused in the same result set.
+    fail to download: Mail.Ru's file URLs 404'd for the whole project (its API
+    hands out an `http://` link its own CDN refuses -- see search()), and that
+    alone lost twelve tracks in a single pass, each recorded as an error while a
+    perfectly good YouTube candidate sat unused in the same result set.
 
     The moment any query returns a match good enough to import unattended, the
     search stops -- no further queries, no further providers. Everything after
@@ -507,6 +645,15 @@ def pick(name, artist, want_dur, providers, album="", min_score=120):
     queries = [f"{artist} - {name}", f"{name} {artist}"]
     if album and album not in (name, f"{name} - Single"):
         queries.append(f"{artist} {name} {album}")
+    # The same widening `base_title` already does for store lookups, which the
+    # audio search never got. A catalogue indexes the recording under its own
+    # name, not under the qualifier the library's release adds: Mail.ru returns
+    # nothing for "Sex Bob-Omb - No Fun (Bonus Track)" and the right 134s file
+    # for "Sex Bob-Omb - No Fun". Four queries, all carrying the qualifier, and
+    # the provider looked as if it had nothing.
+    base = base_title(name)
+    if base != name:
+        queries.append(f"{artist} - {base}")
     queries.append(name)
 
     scored, seen = {}, []
@@ -519,12 +666,22 @@ def pick(name, artist, want_dur, providers, album="", min_score=120):
             scored[key] = (sc, e, prov)
 
     for prov in providers:
+        if out_of_play(prov):
+            continue
         for q in queries:
             for e in search(q, prov):
                 seen.append((e, prov))
-                add(e, prov, score(e, name, artist, want_dur))
+                add(e, prov, score(e, name, artist, want_dur, provider=prov))
             top = max(scored.values(), key=lambda x: x[0], default=None)
-            if top and top[0] >= min_score:
+            # `exhaustive` is for the second pass, after every candidate found this
+            # way failed to DOWNLOAD. Stopping early conflates "a good candidate
+            # exists" with "the audio is obtainable", and a source that searches
+            # but cannot deliver makes those opposites: with YouTube behind
+            # LOGIN_REQUIRED and Mail.ru 404ing every file URL, two full passes
+            # returned 0 of 27 tracks while SoundCloud held downloadable copies
+            # that were never queried, because a YouTube candidate scored 139 on
+            # the first provider and ended the search.
+            if not exhaustive and top and top[0] >= min_score:
                 return sorted(scored.values(), key=lambda x: -x[0])
 
     # Nothing in the exact window. Fall back to the shortest take that is still
@@ -533,7 +690,7 @@ def pick(name, artist, want_dur, providers, album="", min_score=120):
     top = max(scored.values(), key=lambda x: x[0], default=None)
     if top is None or top[0] < min_score:
         for e, prov in seen:
-            add(e, prov, score(e, name, artist, want_dur, lenient=True))
+            add(e, prov, score(e, name, artist, want_dur, lenient=True, provider=prov))
     return sorted(scored.values(), key=lambda x: -x[0])
 
 
@@ -544,7 +701,13 @@ def safe(s):
 def fetch(url, out_base, attempts=3):
     """Download native AAC where possible -- no transcode, and Music plays m4a
     directly. Transient failures (throttling, a dropped connection mid-fragment)
-    are common enough that a single attempt loses tracks that are perfectly fine."""
+    are common enough that a single attempt loses tracks that are perfectly fine.
+
+    A refusal is not one of those, and must not be retried like one. On
+    2026-08-20 every YouTube download in the library came back LOGIN_REQUIRED,
+    and each was still attempted six times -- roughly two minutes per track
+    spent re-asking a question already answered. Retries now stop the moment
+    every variant has refused; anything else still gets its three passes."""
     cmd = ["yt-dlp", url, "-f", "bestaudio[ext=m4a]/bestaudio", "-x",
            "--audio-format", "m4a", "--audio-quality", "0",
            "-o", f"{out_base}.%(ext)s", "-q", "--no-warnings",
@@ -566,16 +729,31 @@ def fetch(url, out_base, attempts=3):
         variants.append(cmd + ["--extractor-args", "youtube:player_client=web_embedded"])
     last = None
     for i in range(attempts):
+        # Only when EVERY variant refused. The embedded-player variant exists
+        # precisely because it sometimes gets past a wall the default client
+        # hits, so one refusal is not the source's final word.
+        all_refused = True
         for variant in variants:
             try:
-                subprocess.run(variant, check=True, timeout=600)
+                subprocess.run(variant, check=True, timeout=600,
+                               capture_output=True, text=True)
                 f = Path(f"{out_base}.m4a")
                 if f.exists():
                     return f
+                all_refused = False
                 last = RuntimeError("yt-dlp produced no output file")
             except Exception as ex:
-                last = ex
                 Path(f"{out_base}.m4a").unlink(missing_ok=True)
+                err = (getattr(ex, "stderr", "") or "").strip() or str(ex)
+                err = err.splitlines()[-1] if err.splitlines() else str(ex)
+                if REFUSED.search(err):
+                    last = Refused(err[:200])
+                else:
+                    all_refused = False
+                    last = RuntimeError(err[:200])
+        if all_refused:
+            print(f"      отказ, повторять нечего: {str(last)[:100]}", flush=True)
+            raise last
         if i + 1 < attempts:
             print(f"      retry {i+1}/{attempts-1} после ошибки: {str(last)[:80]}", flush=True)
             time.sleep(5 * (i + 1))
@@ -616,14 +794,65 @@ def effective_duration(path):
     return dur - lead - tail
 
 
-def itunes(term, entity):
+# The storefront every itunes.apple.com lookup runs against. It CANNOT be
+# detected. macOS's `AppleLocale` is an OS region setting, not the Apple Media
+# Services store, which follows the Apple ID's country -- reading
+# `en_US@rg=byzzzz` as "the Belarusian store" is how a whole availability survey
+# was run against the wrong catalogue while the user's own share links said
+# `/ge/`. Music does not expose the account store to AppleScript and it is not
+# in any readable preference, so this is configuration, not inference.
+#
+# Left at `us` because that is what an omitted `country` has always meant, and
+# 135 of 229 covers were resolved that way. Availability is the part that needs
+# the real one: measured across the 14 tracks still dead on 2026-08-20, ge/by/us
+# agreed on 11, two apparent differences were HTTP 403s that rechecked as real
+# absences, and exactly one was genuine -- `Sex Bob-Omb :: No Fun (Bonus Track)`
+# exists, streamable and exact, in `us` alone.
+STORE = os.environ.get("GEO_UNBLOCKED_STORE", "us")
+
+
+def itunes(term, entity, country=None):
+    """Search the configured storefront AND `us`, merged.
+
+    Not "one, then the other if empty": a storefront answering with the wrong
+    record is not an empty answer, and gating the second look on emptiness hides
+    exactly the case worth finding. Searching "Sex Bob-Omb No Fun" in `ge`
+    returns a different Sex Bob-Omb release, so a fallback keyed on emptiness
+    never fires -- while `us` alone carries the exact track, right artist, right
+    length. Whether a result is the wanted one is the caller's question; this
+    only has to make sure the caller is shown it.
+
+    `limit` is 25 rather than 8 for the same reason: with 8 that exact match sat
+    below the cut, and a truncated list also reads as an absence."""
     import urllib.parse, urllib.request
-    url = (f"https://itunes.apple.com/search?term={urllib.parse.quote(term)}"
-           f"&entity={entity}&limit=8")
-    try:
-        return json.load(urllib.request.urlopen(url, timeout=15))["results"]
-    except Exception:
-        return []
+    out, seen = [], set()
+    for c in dict.fromkeys([country or STORE, "us"]):
+        url = (f"https://itunes.apple.com/search?term={urllib.parse.quote(term)}"
+               f"&entity={entity}&limit=25&country={c}")
+        res = []
+        # Apple throttles with HTTP 403 after a burst, and an unretried 403 is
+        # returned here as an empty list -- the same value that means "this
+        # storefront does not carry it". Every other network path in this file
+        # already retries for exactly that reason.
+        for attempt in range(3):
+            try:
+                res = json.load(urllib.request.urlopen(url, timeout=15))["results"]
+                break
+            except Exception as ex:
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+                else:
+                    # Say so. Retries do not beat a sustained block -- Apple 403s
+                    # this address for the rest of a session after a burst of
+                    # queries -- and silence here becomes "no cover exists".
+                    print(f"      стор {c} отказал ({str(ex)[:40]}) — "
+                          f"это не значит, что записи там нет", flush=True)
+        for r in res:
+            k = r.get("trackId") or r.get("collectionId")
+            if k not in seen:
+                seen.add(k)
+                out.append(r)
+    return out
 
 
 def base_title(name):
@@ -1178,6 +1407,38 @@ end tell'''
     return r.returncode == 0 and r.stdout.strip() == "1"
 
 
+def fold_into_index(name, artist, fav, plays):
+    """Raise the index row from a copy that is about to stop existing.
+
+    Raise-only, like every other write in this project: a re-run must converge,
+    and a stale zero must never overwrite a real number."""
+    if not LIST.exists():
+        return
+    rows = list(csv.reader(LIST.open(encoding="utf-8"), delimiter="\t"))
+    if not rows:
+        return
+    h = rows[0]
+    try:
+        ni, ai = h.index("Name"), h.index("Artist")
+        fi, pi = h.index("Favorited"), h.index("Plays")
+    except ValueError:
+        return
+    changed = False
+    for r in rows[1:]:
+        if len(r) <= max(ni, ai, fi, pi) or r[ni] != name or r[ai] != artist:
+            continue
+        if fav and r[fi].strip().lower() != "true":
+            r[fi] = "true"; changed = True
+        try:
+            if int(plays) > int(r[pi] or 0):
+                r[pi] = str(int(plays)); changed = True
+        except ValueError:
+            pass
+    if changed:
+        with LIST.open("w", encoding="utf-8", newline="") as fh:
+            csv.writer(fh, delimiter="\t").writerows(rows)
+
+
 def purge_ours(name, artist):
     """Music matches a re-imported file to the existing entry and KEEPS the old
     one -- so re-running silently changes nothing unless the previous import is
@@ -1189,6 +1450,8 @@ def purge_ours(name, artist):
     scr = f'''
 tell application "Music"
   set n to 0
+  set fav to false
+  set plays to 0
   set ours to {{}}
   try
     set ours to (get database ID of every track of user playlist "{REFETCHED_PLAYLIST}")
@@ -1199,14 +1462,32 @@ tell application "Music"
       set c to comment of t
     end try
     if c starts with "{MARK}" or c starts with "{OLD_MARKS[0]}" or c starts with "{OLD_MARKS[1]}" or ((database ID of t) is in ours) then
+      try
+        if favorited of t then set fav to true
+      end try
+      try
+        if (played count of t) > plays then set plays to (played count of t)
+      end try
       delete t
       set n to n + 1
     end if
   end repeat
-  return n
+  return (n as text) & tab & (fav as text) & tab & (plays as text)
 end tell'''
     r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=120)
-    return r.stdout.strip() if r.returncode == 0 else "0"
+    if r.returncode != 0:
+        return "0"
+    parts = r.stdout.strip().split("\t")
+    if len(parts) == 3:
+        # Whatever this file carried that the index does not, the index gets --
+        # it is the only record that survives the delete. A heart added to an
+        # import after the last --snapshot lives nowhere else, and this function
+        # is what destroys it: `No Fun (Bonus Track)` was purged and re-imported
+        # three times in one session and lost its favourite on the first pass,
+        # silently, because the index still said false and apply_export_history
+        # is set-only.
+        fold_into_index(name, artist, parts[1].strip() == "true", parts[2].strip())
+    return parts[0]
 
 
 def inherit_history(name, artist, album=""):
@@ -2110,101 +2391,154 @@ def main():
             print("      NOT FOUND"); save_state(st); continue
 
         # Try candidates in order. A source can rank first and still fail to
-        # deliver -- Mail.Ru answers search with file URLs that 404, which alone
-        # cost twelve tracks in one pass while usable YouTube candidates sat
-        # unused in the same result set.
+        # deliver -- Mail.Ru's http file URLs 404'd for the whole project, which
+        # alone cost twelve tracks in one pass while usable YouTube candidates
+        # sat unused in the same result set. That one was ours to fix and is
+        # fixed; the shape of the failure is not rare, so the loop stays.
         handled = False
-        for attempt, (sc, e, prov) in enumerate(cands[:4]):
-            if attempt:
-                print(f"      пробую следующего кандидата ({attempt+1} из {min(len(cands),4)})")
-            url = e.get("url") or e.get("webpage_url")
-            print(f"      -> [{prov} {sc:.0f}] {e.get('uploader')} | {e.get('title')} | {e.get('duration')}s")
-            # A candidate rejected only for being a few seconds long may simply carry
-            # padded silence. That is cheap to settle with evidence: fetch it and
-            # measure the sound itself. Anything still off is a different cut.
-            prefetched = None
-            off = abs((e.get("duration") or 0) - want)
-            # Run this for every wide candidate headed for review, not only ones that
-            # nearly cleared the bar: the whole point is that the score cannot decide
-            # these, so gating the evidence on the score is circular.
-            if (not a.dry_run and prov != "manual"
-                    and DUR_TOLERANCE < off <= DUR_LONG_MAX and sc < a.min_score + 60):
+        tried = set()
+        # A named release is the answer, not a guess to be widened past.
+        widened = bool(vouched)
+        while True:
+            usable = [c for c in cands if not out_of_play(c[2])]
+            skipped = len(cands) - len(usable)
+            if skipped:
+                print(f"      пропускаю {skipped} кандидатов от источников, "
+                      f"отказавших в этом прогоне")
+            for attempt, (sc, e, prov) in enumerate(usable[:4]):
+                if attempt:
+                    print(f"      пробую следующего кандидата ({attempt+1} из {min(len(usable),4)})")
+                url = e.get("url") or e.get("webpage_url")
+                tried.add(url)
+                print(f"      -> [{prov} {sc:.0f}] {e.get('uploader')} | {e.get('title')} | {e.get('duration')}s")
+                # A candidate rejected only for being a few seconds long may simply carry
+                # padded silence. That is cheap to settle with evidence: fetch it and
+                # measure the sound itself. Anything still off is a different cut.
+                prefetched = None
+                off = abs((e.get("duration") or 0) - want)
+                # Run this for every wide candidate headed for review, not only ones that
+                # nearly cleared the bar: the whole point is that the score cannot decide
+                # these, so gating the evidence on the score is circular.
+                if (not a.dry_run and prov != "manual"
+                        and DUR_TOLERANCE < off <= DUR_LONG_MAX and sc < a.min_score + 60):
+                    try:
+                        cand = fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
+                        eff = effective_duration(cand)
+                        if eff and abs(eff - want) <= DUR_TOLERANCE:
+                            # The real gap is now known, so rescore on it rather than
+                            # patching the penalty back off an estimate.
+                            sc = score({**e, "duration": eff}, row["Name"], row["Artist"],
+                                       want, provider=prov)
+                            print(f"      тишина по краям: чистого звука {eff:.0f}s "
+                                  f"(Δ{eff - want:+.0f}s) — принято, score {sc:.0f}")
+                            prefetched = cand
+                        else:
+                            shown = f"{eff:.0f}s (Δ{eff - want:+.0f}s)" if eff else "не измерился"
+                            print(f"      чистого звука {shown} — другой монтаж")
+                            # Text must never outvote the audio: a candidate the
+                            # measurement rejected cannot stay above the import bar.
+                            sc = min(sc, a.min_score - 1)
+                            cand.unlink(missing_ok=True)
+                    except Exception as ex:
+                        print(f"      проверка тишины не удалась: {str(ex)[:60]}")
+
+                # Below this, the match is a guess -- a live cut, a re-upload, a lookalike.
+                # Park it for human review instead of quietly polluting the library.
+                if sc < a.min_score:
+                    st[key] = {"status": "review", "url": url, "score": sc, "cand": e.get("title"),
+                               "uploader": e.get("uploader"), "want": want,
+                               "cand_dur": e.get("duration"), "src": prov,
+                               "secs": round(time.monotonic()-t0,1)}
+                    # Candidates are sorted by score, so anything after this one is
+                    # worse -- there is nothing better left to try.
+                    print("      LOW CONFIDENCE -> review"); save_state(st); break
+                if a.dry_run:
+                    st[key] = {"status": "dry", "url": url, "score": sc,
+                               "cand": e.get("title"), "uploader": e.get("uploader")}
+                    save_state(st); continue
+
                 try:
-                    cand = fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
-                    eff = effective_duration(cand)
-                    if eff and abs(eff - want) <= DUR_TOLERANCE:
-                        # The real gap is now known, so rescore on it rather than
-                        # patching the penalty back off an estimate.
-                        sc = score({**e, "duration": eff}, row["Name"], row["Artist"], want)
-                        print(f"      тишина по краям: чистого звука {eff:.0f}s "
-                              f"(Δ{eff - want:+.0f}s) — принято, score {sc:.0f}")
-                        prefetched = cand
-                    else:
-                        shown = f"{eff:.0f}s (Δ{eff - want:+.0f}s)" if eff else "не измерился"
-                        print(f"      чистого звука {shown} — другой монтаж")
-                        # Text must never outvote the audio: a candidate the
-                        # measurement rejected cannot stay above the import bar.
-                        sc = min(sc, a.min_score - 1)
-                        cand.unlink(missing_ok=True)
+                    f = prefetched or fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
+                    if not f:
+                        raise RuntimeError("no output file")
+                    # Measure what was DELIVERED. Every duration decision before
+                    # this point was made on metadata the source typed, and the
+                    # silence check ran only when the ADVERTISED length already
+                    # looked wrong -- which is precisely when it is not lying.
+                    # Mail.ru is a user-upload catalogue: one entry advertised
+                    # 121s, matched the library to the second, scored 142, and
+                    # delivered a 181KB 12kbps file that came out as 4.4 seconds
+                    # of audio. It imported, and only the user noticed.
+                    got = effective_duration(f)
+                    if got is None:
+                        f.unlink(missing_ok=True)
+                        raise RuntimeError("длительность скачанного файла не измерилась")
+                    if abs(got - want) > DUR_TOLERANCE:
+                        # A human named this release; say so and take it anyway.
+                        if prov == "manual":
+                            print(f"      ⚠ по факту {got:.0f}s против {want}s — "
+                                  f"беру, потому что источник указан вручную", flush=True)
+                        else:
+                            f.unlink(missing_ok=True)
+                            raise RuntimeError(
+                                f"скачано {got:.0f}s вместо {want}s — не та запись")
+                    art_src = tag(f, row,
+                                  e.get("thumbnails", [{}])[-1].get("url") if e.get("thumbnails") else None,
+                                  src_url=url, uploader=e.get("uploader") or "",
+                                  trusted_thumb=bool(e.get("trusted_art")),
+                                  hint=e.get("title") or "")
+                    # Park BEFORE importing: once our file is added Music may be mid-merge,
+                    # and the dead original briefly stops being findable.
+                    parked = park_original(row["Name"], row["Artist"])
+                    purged = purge_ours(row["Name"], row["Artist"])
+                    tid = add_to_music(f)
+                    add_to_playlist(tid, REFETCHED_PLAYLIST)
+                    # Only matters when the original did NOT merge; a merge already keeps
+                    # the history, and inherit_history finds no dead entry to copy from.
+                    inherit_history(row["Name"], row["Artist"], row.get("Album", ""))
+                    plays = apply_export_history(row)
+                    # Music copies imports into its own Media folder, so the staged file is
+                    # now a second copy of the same audio. Drop it.
+                    f.unlink(missing_ok=True)
+                    st[key] = {"status": "ok", "url": url, "src": prov, "score": sc, "art": art_src,
+                               "track": tid, "parked": parked, "purged": purged,
+                               "plays": plays, "uploader": e.get("uploader"),
+                               "cand": e.get("title"),
+                               "secs": round(time.monotonic()-t0,1)}
+                    print(f"      ADDED  art={art_src} parked={parked} plays={plays} "
+                          f"({time.monotonic()-t0:.0f}s)")
+                    handled = True
+                    break
                 except Exception as ex:
-                    print(f"      проверка тишины не удалась: {str(ex)[:60]}")
-
-            # Below this, the match is a guess -- a live cut, a re-upload, a lookalike.
-            # Park it for human review instead of quietly polluting the library.
-            if sc < a.min_score:
-                st[key] = {"status": "review", "url": url, "score": sc, "cand": e.get("title"),
-                           "uploader": e.get("uploader"), "want": want,
-                           "cand_dur": e.get("duration"), "src": prov,
-                           "secs": round(time.monotonic()-t0,1)}
-                # Candidates are sorted by score, so anything after this one is
-                # worse -- there is nothing better left to try.
-                print("      LOW CONFIDENCE -> review"); save_state(st); break
-            if a.dry_run:
-                st[key] = {"status": "dry", "url": url, "score": sc,
-                           "cand": e.get("title"), "uploader": e.get("uploader")}
-                save_state(st); continue
-
-            try:
-                f = prefetched or fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
-                if not f:
-                    raise RuntimeError("no output file")
-                art_src = tag(f, row,
-                              e.get("thumbnails", [{}])[-1].get("url") if e.get("thumbnails") else None,
-                              src_url=url, uploader=e.get("uploader") or "",
-                              trusted_thumb=bool(e.get("trusted_art")),
-                              hint=e.get("title") or "")
-                # Park BEFORE importing: once our file is added Music may be mid-merge,
-                # and the dead original briefly stops being findable.
-                parked = park_original(row["Name"], row["Artist"])
-                purged = purge_ours(row["Name"], row["Artist"])
-                tid = add_to_music(f)
-                add_to_playlist(tid, REFETCHED_PLAYLIST)
-                # Only matters when the original did NOT merge; a merge already keeps
-                # the history, and inherit_history finds no dead entry to copy from.
-                inherit_history(row["Name"], row["Artist"], row.get("Album", ""))
-                plays = apply_export_history(row)
-                # Music copies imports into its own Media folder, so the staged file is
-                # now a second copy of the same audio. Drop it.
-                f.unlink(missing_ok=True)
-                st[key] = {"status": "ok", "url": url, "src": prov, "score": sc, "art": art_src,
-                           "track": tid, "parked": parked, "purged": purged,
-                           "plays": plays, "uploader": e.get("uploader"),
-                           "cand": e.get("title"),
-                           "secs": round(time.monotonic()-t0,1)}
-                print(f"      ADDED  art={art_src} parked={parked} plays={plays} "
-                      f"({time.monotonic()-t0:.0f}s)")
-                handled = True
+                    # Record whether a delete already happened. Adjacent is not atomic:
+                    # if the import failed after purge_ours removed the previous copy,
+                    # the track is gone and a later run must know to re-add rather than
+                    # treat this as an ordinary failure.
+                    st[key] = {"status": "error", "url": url, "error": str(ex),
+                               "purged": locals().get("purged", "?"),
+                               "secs": round(time.monotonic()-t0,1)}
+                    print(f"      ERROR  {ex}")
+                    note_refusal(prov, str(ex))
+                    # Deliberately no break: the next candidate is the whole point.
+            # `not tried` means nothing was ever downloaded: the best candidate
+            # was already below the bar, so pick() never returned early and every
+            # provider has been asked. Anything else means the audio is what we
+            # failed to get, and the score -- including a LOW CONFIDENCE one
+            # reached only because the better candidates would not download -- is
+            # the wrong thing to end the search on.
+            if handled or widened or not (tried or skipped):
                 break
-            except Exception as ex:
-                # Record whether a delete already happened. Adjacent is not atomic:
-                # if the import failed after purge_ours removed the previous copy,
-                # the track is gone and a later run must know to re-add rather than
-                # treat this as an ordinary failure.
-                st[key] = {"status": "error", "url": url, "error": str(ex),
-                           "purged": locals().get("purged", "?"),
-                           "secs": round(time.monotonic()-t0,1)}
-                print(f"      ERROR  {ex}")
-                # Deliberately no break: the next candidate is the whole point.
+            # The ranking was never the problem: the providers pick() skipped
+            # were simply never asked.
+            widened = True
+            wider = pick(row["Name"], row["Artist"], want, providers,
+                         row.get("Album", ""), a.min_score, exhaustive=True)
+            cands = [c for c in wider
+                     if (c[1].get("url") or c[1].get("webpage_url")) not in tried]
+            if not cands:
+                break
+            print(f"      ни один кандидат не скачался — добираю остальные "
+                  f"источники ({len(cands)} новых)")
         save_state(st)
 
     ok = sum(1 for v in st.values() if v.get("status") == "ok")

@@ -24,9 +24,18 @@ python3 geo-unblock.py --refresh-index --playlist "Some Playlist"   # narrow the
 ```
 
 The scan runs automatically the first time if no list exists yet, takes about a
-minute on a 6500-track library, and writes `data/list.tsv`. Rerun it whenever
+second on a 6500-track library, and writes `data/list.tsv`. Rerun it whenever
 the library changes; tracks already replaced drop out on their own, since they
 are no longer unavailable.
+
+Store lookups (artwork, availability) go to the storefront named by
+`GEO_UNBLOCKED_STORE`, defaulting to `us`, plus `us` as a second look. It cannot
+be detected — macOS's region is not the Apple ID's storefront — so set it if
+yours differs:
+
+```bash
+GEO_UNBLOCKED_STORE=ge python3 geo-unblock.py --repair
+```
 
 `--playlist` is for scoping to a subset — a playlist you maintain by hand, or a
 smart playlist with extra conditions. Without it the whole library is scanned.

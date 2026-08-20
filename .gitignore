@@ -10,6 +10,11 @@ data/Geoblocked.txt
 data/list.tsv
 data/state.json
 
+# Any copy of the index is the same history under another name. Backing it up
+# before a destructive pass is prescribed (CLAUDE.md), so the copies WILL be
+# made -- and `data/list.tsv` alone does not match `data/list.tsv.bak-...`.
+data/list.tsv.*
+
 # Download staging; Music copies imports into its own Media folder
 work/
 
