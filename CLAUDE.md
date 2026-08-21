@@ -475,6 +475,38 @@ is rejected outright, long is penalised and allowed as a second-pass fallback.
 often the same recording with padded silence. `silencedetect` settles it: one
 track ran 206s in the file and 198s of actual sound against an expected 195s.
 
+**A romanised artist cannot reach a Cyrillic catalogue, and one back-
+transliterated query is the whole fix.** Mail.ru answers
+`Raznye Ludi - Такие дела` with four unrelated songs and `Такие дела Разные`
+with the record on the second row. Measured over the 31 library tracks that have
+a Cyrillic title and a romanised artist:
+
+| queries | found by duration |
+|---|---|
+| the existing set | **23 of 31** |
+| title + one back-transliterated token | 9 |
+| title + up to eight variants | 10 |
+
+Back-transliteration alone is far worse -- but it reaches two tracks the existing
+queries never can (`Raznye Ludi :: Такие дела`, `Alisa :: Пуля`), so it is added
+as ONE extra query, not as a replacement. Eight variants instead of one bought
+exactly one additional track, so the variant machinery was dropped.
+
+Three details it took measuring to get right. **Only the longest artist token**
+is used: search engines AND their terms, so `Разные луди` (from `Ludi`, where
+Apple wrote `ю` as `u`) finds nothing while `Разные` alone works. **Inverting
+`CYR` mechanically is wrong** -- `y` is both `ы` and `й`, and the dict order
+turns `Raznye` into `разнйе`; `_UNCYR` names the likelier letter explicitly.
+And **`ь` is dropped by romanisation and never comes back**: `Nol` cannot become
+`Ноль`. That costs nothing here only because the existing queries already find
+every `Nol` track.
+
+A related wrinkle, measured and left alone: our transliteration and Apple's
+disagree, so `Raznye Ludi` tokenises to `{raznye, ludi}` and `Разные люди` to
+`{raznye, lyudi}`. The artist match survives on `raznye`, so nothing was changed
+-- but a two-token artist whose every token diverges would score as having no
+artist evidence at all.
+
 The Apple export **romanises Cyrillic artists** ("Akvarium", "Aleksey Vishnya"),
 so artist-qualified queries miss entirely for Russian material. Both the matcher
 and the artwork search fold Cyrillic to Latin, and image search additionally
@@ -715,6 +747,13 @@ the source has nothing.
 
 ## Working agreements with Art
 
+- **Do not bring decisions back to Art. Measure instead.** When a change could
+  go two ways, run the honest experiment -- the approach and its counterweight,
+  on a sample large enough to mean something -- and decide from the numbers.
+  This has already overturned two confident instincts in one session:
+  candidate-vs-candidate audio clustering lost to the existing scorer 5-6 on 15
+  tracks, and multi-variant back-transliteration bought one track for eight
+  times the queries. Both would have shipped on argument alone.
 - **Do not ask whether to run the full pass.** It happens when Art says so; a
   slice is the development set. The target is all of the slice, not most of it.
 - One change at a time; report a latent fragility once rather than pushing it.

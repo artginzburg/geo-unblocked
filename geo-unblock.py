@@ -84,6 +84,40 @@ CYR = {
 }
 
 
+# Back-transliteration, for building SEARCH queries only -- never for matching.
+# Apple romanises Cyrillic artists, and Russian-language catalogues index the
+# Cyrillic, so `Raznye Ludi - Такие дела` returns four unrelated songs from
+# Mail.ru while `Такие дела Разные` returns the record on the second row.
+# Lossy on purpose and known to be: `ю` was written `u`, so `Ludi` comes back as
+# `луди`, and a query carrying that token finds NOTHING -- search engines AND
+# their terms, and one wrong word is fatal. Hence only the single longest token
+# is used: the longer the word, the likelier it round-tripped intact.
+# Longest Latin unit first, and where romanisation is ambiguous the MOST LIKELY
+# Cyrillic letter -- `y` is both `ы` and `й`, `u` is both `у` and `ю`. Inverting
+# CYR mechanically picks whichever key the dict yields and turns "Raznye" into
+# "разнйе", which finds nothing. Only one guess is made: measured over the 31
+# library tracks with a Cyrillic title and a romanised artist, trying up to
+# eight variants instead of one found exactly one extra track (10 against 9),
+# for eight times the queries.
+_UNCYR = [("shch", "щ"), ("zh", "ж"), ("kh", "х"), ("ts", "ц"), ("ch", "ч"),
+          ("sh", "ш"), ("yu", "ю"), ("ya", "я"), ("yo", "ё"), ("y", "ы"),
+          ("u", "у"), ("e", "е"), ("i", "и"), ("a", "а"), ("b", "б"),
+          ("v", "в"), ("g", "г"), ("d", "д"), ("z", "з"), ("k", "к"),
+          ("l", "л"), ("m", "м"), ("n", "н"), ("o", "о"), ("p", "п"),
+          ("r", "р"), ("s", "с"), ("t", "т"), ("f", "ф"), ("h", "х")]
+
+
+def to_cyr(s):
+    out, i, low = [], 0, s.lower()
+    while i < len(low):
+        for lat, cyr in _UNCYR:
+            if low.startswith(lat, i):
+                out.append(cyr); i += len(lat); break
+        else:
+            out.append(low[i]); i += 1
+    return "".join(out)
+
+
 def norm(s):
     s = unicodedata.normalize("NFKD", s.lower())
     s = "".join(CYR.get(c, c) for c in s)
@@ -654,6 +688,11 @@ def pick(name, artist, want_dur, providers, album="", min_score=120, exhaustive=
     base = base_title(name)
     if base != name:
         queries.append(f"{artist} - {base}")
+    # A Cyrillic title with a romanised artist cannot reach a Cyrillic catalogue.
+    if re.search(r"[а-яё]", name.lower()) and not re.search(r"[а-яё]", artist.lower()):
+        tok = max(artist.split(), key=len, default="")
+        if len(tok) > 3:
+            queries.append(f"{name} {to_cyr(tok)}")
     queries.append(name)
 
     scored, seen = {}, []
