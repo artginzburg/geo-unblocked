@@ -1032,6 +1032,83 @@ end tell'''
     return r.returncode == 0 and r.stdout.strip() == "1"
 
 
+def released_where(row, want):
+    """Two different answers with two different actions, kept apart.
+
+    `store` -- the recording is in the user's Apple Music storefront. THAT is
+    actionable: he adds it with one click and the history is carried across,
+    which worked twice on 2026-08-20.
+
+    `deezer` -- it was published, but is not in Apple Music. There is nothing to
+    click: you cannot add a Deezer track to an Apple Music library. Saying
+    "добавь из стриминга" here is advice to do something that does not exist,
+    and this function existed for one revision printing exactly that about
+    `Сатана Печёт Блины :: Sigma`, which is in no Apple storefront under any of
+    four query forms. What it is still worth saying is that the record is real,
+    so the title, artist and length are confirmed and a copy may surface later.
+
+    Deezer cannot ever be an audio source: its public API serves a 30s 128kbps
+    preview and yt-dlp has no extractor for it.
+
+    Both checks are STRICT -- artist AND duration must match. Over the 11 tracks
+    still dead that gives one hit and no false ones; matching on title and
+    duration alone adds a single wrong lead (`The Imperas :: Twin Peaks Theme`
+    answered by Dominik Hauser's own re-recording)."""
+    import urllib.parse, urllib.request
+
+    def fits(artist, title, dur):
+        return (abs(dur - want) <= DUR_TOLERANCE
+                and bool(tokens(row["Artist"]) & tokens(artist))
+                and bool(tokens(row["Name"]) & tokens(title)))
+
+    maybe = None
+    for term in (f'{row["Artist"]} {base_title(row["Name"])}', base_title(row["Name"])):
+        for r in itunes(term, "song"):
+            if not r.get("isStreamable"):
+                continue
+            dur = r.get("trackTimeMillis", 0) / 1000
+            if abs(dur - want) > DUR_TOLERANCE:
+                continue
+            want_t, got_t = tokens(base_title(row["Name"])), tokens(r.get("trackName", ""))
+            if not want_t:
+                continue
+            link = r.get("trackViewUrl", "").split("&uo=")[0]
+            if not (want_t & got_t):
+                continue
+            if tokens(row["Artist"]) & tokens(r.get("artistName", "")):
+                return "store", link
+            # EVERY word of the wanted title, not merely some. Partial overlap is
+            # what produced every false lead measured: "Confidential Liar (Live)"
+            # answered by "Keep It Confidential" on the word `confidential`
+            # alone, "Sigma (feat …)" by Epic Soul Factory's unrelated "Sigma",
+            # "Can't Do It Like Me" by "Do It Like Me". The one true lead --
+            # Geek Music for `FPS Allstars` -- carries the whole title and more.
+            if not want_t <= got_t:
+                continue
+            # The artist did not match -- which is exactly what happens when the
+            # library credits an aggregator and the store credits the publisher.
+            # `FPS Allstars :: No Place for No Hero` is published as Geek Music,
+            # and requiring the artist made this function blind to the one case
+            # that prompted writing it. Reported as a lead for a person to judge,
+            # never as a verdict: a title+duration match also answers `The
+            # Imperas :: Twin Peaks Theme` with someone else's re-recording.
+            if maybe is None:
+                maybe = ("maybe", f"{r['artistName']} — {r['trackName']} :: {link}")
+    q = urllib.parse.quote(f'artist:"{row["Artist"]}" track:"{base_title(row["Name"])}"')
+    try:
+        data = json.load(urllib.request.urlopen(
+            f"https://api.deezer.com/search?q={q}&limit=10", timeout=15)).get("data", [])
+    except Exception:
+        data = []
+    for t in data:
+        if fits(t["artist"]["name"], t["title"], t.get("duration", 0)):
+            return "deezer", t.get("link")
+    # Last, because a guess must never shadow a fact: for `Сатана Печёт Блины ::
+    # Sigma` the store offers an unrelated "Sigma" by Epic Soul Factory while
+    # Deezer confirms the real release, and returning the guess first hid it.
+    return maybe if maybe else (None, None)
+
+
 def deezer_art(row):
     """Second store, checked the same way as iTunes. Catches releases missing from
     Apple -- compilations and small labels especially."""
@@ -2297,6 +2374,14 @@ end tell'''], capture_output=True, text=True, timeout=180).stdout
         for k, v in items:
             extra = v.get("cand") or v.get("error") or ""
             print(f"  {k}" + (f"\n      кандидат: {extra[:70]}" if extra else ""))
+            rel = v.get("released") or ""
+            if rel.startswith("store:"):
+                print(f"      ЕСТЬ В APPLE MUSIC — добавь, историю перенесу: {rel[6:]}")
+            elif rel.startswith("maybe:"):
+                print(f"      возможно это оно, но артист записан иначе — проверь:"
+                      f"\n      {rel[6:]}")
+            elif rel.startswith("deezer:"):
+                print(f"      издан, но ни в Apple Music, ни у источников: {rel[7:]}")
     print()
 
 
@@ -2445,7 +2530,19 @@ def main():
             row["Name"], row["Artist"], want, providers, row.get("Album", ""), a.min_score)
         if not cands:
             st[key] = {"status": "not_found", "want": want, "secs": round(time.monotonic()-t0,1)}
-            print("      NOT FOUND"); save_state(st); continue
+            where, link = released_where(row, want)
+            if where:
+                st[key]["released"] = f"{where}:{link}"
+                print("      НЕ НАЙДЕНО у источников. " + (
+                    f"Но он есть в Apple Music: {link}\n      добавь — историю перенесу"
+                    if where == "store" else
+                    f"Возможно это оно, артист записан иначе — проверь:\n      {link}"
+                    if where == "maybe" else
+                    f"Издан ({link}), но в Apple Music его нет —\n"
+                    f"      добавить нечего, ждём, пока где-нибудь всплывёт копия"))
+            else:
+                print("      NOT FOUND")
+            save_state(st); continue
 
         # Try candidates in order. A source can rank first and still fail to
         # deliver -- Mail.Ru's http file URLs 404'd for the whole project, which
@@ -2508,7 +2605,21 @@ def main():
                                "secs": round(time.monotonic()-t0,1)}
                     # Candidates are sorted by score, so anything after this one is
                     # worse -- there is nothing better left to try.
-                    print("      LOW CONFIDENCE -> review"); save_state(st); break
+                    print("      LOW CONFIDENCE -> review")
+                    # Also here, not only in the not_found branch: a track with a
+                    # bad candidate has been given up on just as completely as one
+                    # with none, and `Сатана Печёт Блины :: Sigma` proved it --
+                    # the only thing any source offered was a cover, so it parked
+                    # for review while the real release sat published on Deezer.
+                    where, link = released_where(row, want)
+                    if where:
+                        st[key]["released"] = f"{where}:{link}"
+                        print(f"      но он есть в Apple Music: {link}\n"
+                              f"      добавь его — историю перенесу" if where == "store" else
+                              f"      возможно это оно, артист записан иначе — проверь:\n"
+                              f"      {link}" if where == "maybe" else
+                              f"      издан ({link}), но в Apple Music его нет")
+                    save_state(st); break
                 if a.dry_run:
                     st[key] = {"status": "dry", "url": url, "score": sc,
                                "cand": e.get("title"), "uploader": e.get("uploader")}

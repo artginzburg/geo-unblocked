@@ -648,6 +648,33 @@ recovered from anywhere once the dead entry is gone.
 
 ## Sources, in practice
 
+- **Deezer cannot be an audio source, and never was one.** Its public API serves
+  a 30-second 128kbps `preview` and yt-dlp has no Deezer extractor at all. It is
+  called in exactly one place, `deezer_art()`.
+- **"Released" is three different answers, and only one is actionable.**
+  `released_where()` separates them, in this order, because a guess must never
+  shadow a fact:
+  1. `store` — in the user's Apple Music storefront, artist and duration both
+     matching. He clicks add, the history is carried across. Worked twice on
+     2026-08-20.
+  2. `deezer` — published, but not in Apple Music. **There is nothing to click.**
+     You cannot add a Deezer track to an Apple Music library, and one revision
+     of this printed "добавь из стриминга" about `Сатана Печёт Блины :: Sigma`,
+     which is in no Apple storefront under any of four query forms. What it is
+     still worth saying: the record is real, so title, artist and length are
+     confirmed and a copy may surface later.
+  3. `maybe` — the title and duration match in the store but the artist does
+     not, which is exactly what an aggregator credit looks like. Requiring the
+     artist made the check blind to `FPS Allstars :: No Place for No Hero`,
+     published as **Geek Music** — the very case that prompted writing it.
+  **Every word of the wanted title must be present** for a `maybe`, not merely
+  some. Measured over the 11 tracks still dead: partial overlap produced three
+  leads and all three were wrong — "Confidential Liar (Live)" answered by "Keep
+  It Confidential" on the word `confidential` alone, "Sigma (feat …)" by Epic
+  Soul Factory's unrelated "Sigma", "Can't Do It Like Me" by "Do It Like Me".
+  Requiring the whole title leaves one lead and it is the true one. A line that
+  is wrong four times out of five teaches the reader to skip it.
+
 - **Mail.ru was never broken. Our URL scheme was.** For the whole project this
   file recorded "Mail.Ru answers search with file URLs that 404" as a property
   of the source. It cost twelve tracks in a single pass, and `pick()` returns a
