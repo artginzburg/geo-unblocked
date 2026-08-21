@@ -62,6 +62,17 @@ instead of what the library *holds*.
   match was not re-added afterwards. Inside the script it is safe, because
   delete and add are adjacent. As a standalone cleanup it is not.
 
+## Two playlists can share a name, and every reference here is by name
+
+Music allows duplicate playlist names and `user playlist "X"` resolves to
+whichever comes first. Two `Geo-Unblocked — refetched` playlists appeared in one
+session -- iCloud sync is enough to do it -- and imports split between them, 230
+in one and 228 in the other, differing by exactly the two most recent tracks.
+Nothing reported it: `ensure_playlists()` only asked `exists`, which is true of
+both. It now counts and prints a warning when there is more than one. Merging is
+destructive and stays the user's call; the diff to check is which persistent IDs
+one holds and the other does not.
+
 ## The third playlist cannot be built, and the dictionary says so
 
 A live smart playlist tracking `no longer available` is the obvious companion to
@@ -151,6 +162,22 @@ are `.movpkg`, comment empty, `subscription`.
 
 ## AppleScript traps
 
+- **A subscription track will not hold a written play count while a same-named
+  dead twin is still in the library.** Writing `played count` and `skipped
+  count` onto the store copy of `Bad Style :: Time Back` read back correct and
+  was 0 again seconds later, while `played date` and `comment` on the same track
+  held. iCloud reconciles the two entries and the counter loses. Deleting the
+  dead entry FIRST and then writing worked on the first try and stuck. The same
+  transfer onto `Geek Music — Borderlands 2 …` held immediately, because there
+  the store title differs from the library's and no twin existed. So the order
+  is: delete the dead entry, then carry the history onto the replacement — the
+  opposite of the order used for our own imported files, where the dead entry is
+  the only thing holding the record. `data/list.tsv` is what makes deleting
+  first safe: it already holds the counts.
+- **Verify a write after a delay, never by the readback in the same script.**
+  Every reverted write in this project read back correct at the moment it was
+  made. An immediate `return played count of t` proves the value was accepted,
+  not that it was kept.
 - **Never write to a track that is playing.** Music overwrites the metadata of
   the current track with its own playback bookkeeping, so a scripted write lands,
   reads back correct, and is gone a minute later. Diagnosed the long way: a

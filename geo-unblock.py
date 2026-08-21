@@ -1705,12 +1705,22 @@ def ensure_playlists():
     today = datetime.date.today().strftime("%d.%m.%Y")
     for p in (REPLACED_PLAYLIST, REFETCHED_PLAYLIST):
         note = PLAYLIST_NOTES.get(p, "").format(date=today).replace('"', "'")[:255]
-        subprocess.run(["osascript", "-e", f'''
+        # Count, never just `exists`. Two playlists can end up sharing a name --
+        # iCloud sync is enough to do it -- and every reference in this file is
+        # BY NAME, which AppleScript resolves to whichever comes first. That is
+        # how 230 imports and 228 imports ended up in two "Geo-Unblocked —
+        # refetched" playlists that differed by two tracks. Merging them is
+        # destructive and is the user's call, so this only refuses to be quiet.
+        r = subprocess.run(["osascript", "-e", f'''
 tell application "Music"
-  if not (exists user playlist "{p}") then
+  set n to 0
+  repeat with pl in (every user playlist)
+    if (name of pl) is "{p}" then set n to n + 1
+  end repeat
+  if n is 0 then
     make new user playlist with properties {{name:"{p}"}}
   end if
-  set pl to user playlist "{p}"
+  set pl to (first user playlist whose name is "{p}")
   try
     -- `missing value as string` is the literal text "missing value", not "",
     -- so an unset description reads as thirteen characters of content and a
@@ -1718,7 +1728,15 @@ tell application "Music"
     set d to description of pl
     if d is missing value or (d as string) is "" then set description of pl to "{note}"
   end try
+  return n
 end tell'''], capture_output=True, text=True, timeout=60)
+        try:
+            if int(r.stdout.strip()) > 1:
+                print(f"      ⚠ плейлистов с именем «{p}» больше одного "
+                      f"({r.stdout.strip()}) — треки будут попадать в первый из них, "
+                      f"объедини их вручную", flush=True)
+        except ValueError:
+            pass
 
 
 def add_to_playlist(track_ref, playlist):
