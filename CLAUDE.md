@@ -519,6 +519,33 @@ This is the same lesson as `FPS Allstars` being published as `Geek Music`, with
 a method attached: **the library's artist is often not the distributor's artist,
 and the audio is the only identifier that survives the renaming.**
 
+### Apple's own preview outlives the track, and the Wayback Machine knows where it is
+
+Spotify and Deezer both return no preview for a restricted track, so the method
+above looked unavailable for exactly the tracks that need it. Apple's does not
+go away: **a removed track's preview stays on Apple's CDN**, and the URL is in
+any archived copy of the album page. Measured 2026-10-16 on `405Okced ::
+Creelles Town` — the Wayback snapshot (2024-09-10) of Apple album 1687591289
+listed `audio-ssl.itunes.apple.com/itunes-assets/AudioPreview116/…plus.aac.p.m4a`
+for all 21 tracks, and every one still answered HTTP 200 with 30s of 272k AAC,
+years after the album left every storefront. Ask the CDX index by the exact page
+prefix (`music.apple.com/us/album/<slug>*`); domain-wide queries time out.
+
+**Apple's preview window is predictable, which makes it a ruler for edits too.**
+On that album: a track of 79s or more previews from 45.0s, a 72s track from
+30.0s, a 25s track from 0. Four tracks known to equal the developer's rips
+landed at 44.94-44.98s of the rip, so the offset is real and constant. That is
+what settled where the distributor had cut a 72s release out of a 120s piece:
+the preview sat at 29.94s of the rip, so the release starts at the rip's 0.
+`Boss Rush`, previewed in full at 25s, confirmed the same scheme with no fade
+and gain unchanged to 0.0 dB. The exact copy is therefore `rip[0:72.051]` —
+reconstructed, not found, and verified against Apple's own audio for 30 of its
+72 seconds.
+
+The obvious next use: tracks parked with a plausible candidate and nothing to
+check it against — `Hobart Ocean :: Confidential Liar (Live)` has a 2010 live
+video and no reference at all.
+
 ## Verified discovery beats a trusted caption
 
 Spotify covers can be reached with no account: search for the release, take the
@@ -913,6 +940,17 @@ recovered from anywhere once the dead entry is gone.
   1. `store` — in the user's Apple Music storefront, artist and duration both
      matching. He clicks add, the history is carried across. Worked twice on
      2026-08-20.
+     **The click is a person's, and that is measured, not assumed.** Music's
+     dictionary has one `add` command and it takes *files* (`<type type="file"
+     list="yes"/>`); nothing adds a catalogue item. Driving Music's UI is not an
+     option in this environment either: computer-use control of Music is
+     blocked by policy, and scripting its buttons through System Events would be
+     a way around that block, not a solution. The Apple Music API can add to a
+     library (`POST /v1/me/library`), but needs a MusicKit developer token AND a
+     Music User Token from the user's own sign-in — a setup out of proportion to
+     the handful of tracks this ever applies to. What the tool can do is cut the
+     human part to one click: `open "music://music.apple.com/…"` lands on the
+     track, and carrying the history afterwards is ours.
   2. `foreign` — in Apple Music, but in a storefront this account cannot reach.
      **There is nothing to click here either**, and for one revision this
      function said there was: `Sex Bob-Omb :: Summertime` is streamable at
