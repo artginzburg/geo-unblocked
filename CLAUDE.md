@@ -573,12 +573,18 @@ It was imported by hand on 2026-10-16 through the module's own `tag`,
 `park_original`, `add_to_music`, `inherit_history` and `apply_export_history`,
 in the main loop's order, with the comment naming the cut
 (`3pUhABVI0Xs [0:72.051, …]`) and the cover named in `artwork_sources.json`.
-**The recipe is not reproducible by the tool:** `track_sources.json` takes a
-URL and nothing says "the first 72.051s of it", so a clean pass that purges our
-imports would lose this track and then park the 120s rip as a different edit.
-The recipe lives in `state.json`'s note for that row and in this paragraph.
-If a second track ever needs the same, that is the time to give
-`track_sources.json` an optional trim, not before.
+**The recipe is now the tool's, two ways.** `track_sources.json` takes
+`{"url": …, "trim": [0, 72.052]}`, and that entry is in the file, so a clean
+pass reproduces the import. And with no trim named, the main loop derives it:
+the downloaded rip is 48s too long, the Wayback reference sits at 30.0s of it,
+`apple_window(72.052)` says the preview starts 30s into the release, so the
+release is `[0.0:72.052]` -- 1ms from the hand-made cut, because Apple's page
+says 72052ms. `cut()` was checked on its own: `[10:82.052]` of a Summertime
+upload came out 72.059s with the preview moved by exactly 10.000s.
+
+`apple_window` trusts only what was measured: 45s when the release is at least
+75s, 30s when it is at least 60s, 0 when the preview is the whole track. Between
+30s and 60s it returns nothing and nothing is trimmed.
 
 `add_to_music` failed once on this import with `-1700 Can't make some data into
 the expected type` and succeeded on an identical retry seconds later, returning
@@ -731,8 +737,8 @@ system Python, and none needed). The reference is the expensive part when there
 is none to find -- up to five Wayback probes and two Brave queries, about 20s --
 and it is fetched only once a candidate is actually downloaded.
 
-**`--audition`** runs the real loop -- search, download, reference, verdict --
-and stops where the import would start. It writes neither the library
+**`--audition`** runs the real loop -- search, download, reference, verdict,
+trim -- and stops where the import would start. It writes neither the library
 nor `state.json`, and with `--track` it runs on rows already done. It is how
 every number in this section was produced through the changed path rather than
 beside it.

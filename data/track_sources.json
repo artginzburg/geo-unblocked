@@ -16,5 +16,9 @@
   "Dan Mervis :: Winter Jam": "https://danmervismusic.com/player/959078/tracks/1751839.mp3",
   "Sex Bob-Omb :: Summertime": "https://moosic.my.mail.ru/file/029db98b66da2c6d7994514a32b3b8c5.mp3",
   "The Imperas :: Twin Peaks Theme (From 'twin Peaks')": "https://www.youtube.com/watch?v=H-swIYzPA9M",
-  "Bass Boosted :: Pyrotex": "https://dl2.mp3party.net/online/8982205.mp3"
+  "Bass Boosted :: Pyrotex": "https://dl2.mp3party.net/online/8982205.mp3",
+  "405Okced :: Creelles Town (feat. Lucas Boato De Souza)": {
+    "url": "https://www.youtube.com/watch?v=3pUhABVI0Xs",
+    "trim": [0, 72.052]
+  }
 }

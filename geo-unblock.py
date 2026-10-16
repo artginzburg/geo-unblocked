@@ -504,7 +504,12 @@ def pick_from_track_source(row):
         srcs = json.loads(TRACK_SOURCES.read_text()) if TRACK_SOURCES.exists() else {}
     except Exception:
         return None
-    url = srcs.get(f"{row['Artist']} :: {row['Name']}")
+    src = srcs.get(f"{row['Artist']} :: {row['Name']}")
+    # A plain URL, or {"url": ..., "trim": [start, end]} when the release is a
+    # cut of what the source holds -- `Creelles Town` is the first 72.051s of a
+    # 120s rip, and a URL alone could not say so, which left the one track
+    # reconstructed that way outside the tool: a clean pass would have lost it.
+    url, trim = (src.get("url"), src.get("trim")) if isinstance(src, dict) else (src, None)
     if not url:
         return None
     r = subprocess.run(["yt-dlp", url, "-J", "--no-warnings", "--skip-download",
@@ -523,6 +528,7 @@ def pick_from_track_source(row):
         "thumbnails": d.get("thumbnails") or ([{"url": d["thumbnail"]}] if d.get("thumbnail") else []),
         # vouched for by a person, so its image is as trustworthy as a named release
         "trusted_art": True,
+        "trim": trim,
     }
     return (999.0, entry, "manual")
 
@@ -861,6 +867,17 @@ def container_duration(path):
              "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=60).stdout.strip())
     except Exception:
         return None
+
+
+def cut(path, start, end):
+    """Keep [start, end] seconds of a file, without re-encoding -- AAC and MP3
+    frames are each independently decodable, so a stream copy cuts to within a
+    frame (~23ms) and loses nothing."""
+    out = path.with_suffix(".cut" + path.suffix)
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+                    "-i", str(path), "-c", "copy", str(out)], check=True, timeout=180)
+    out.replace(path)
+    return path
 
 
 class AudioMismatch(RuntimeError):
@@ -1241,6 +1258,24 @@ REF_SOURCES = (("itunes", _ref_itunes), ("deezer", _ref_deezer), ("genius", _ref
                ("wayback", _ref_wayback_apple), ("spotify", _ref_spotify))
 
 
+def apple_window(dur):
+    """Where in the release Apple's 30s preview starts, from the release length.
+
+    Measured on `Creepypasta Land`, 2026-10-16: tracks of 79s and more preview
+    from 45.0s, the 72s track from 30.0s, the 25s track from 0 -- in full. That
+    is "the first of 45 and 30 that leaves room for 30 seconds", and nothing in
+    between was measured, so a length under 60s other than a full preview gets
+    no window rather than a guess."""
+    if not dur:
+        return None
+    if dur <= 30.5:
+        return 0.0
+    for s in (45.0, 30.0):
+        if s + 30 <= dur:
+            return s
+    return None
+
+
 def _load_refs():
     try:
         return json.loads(REFS_INDEX.read_text())
@@ -1252,7 +1287,8 @@ def reference(row, want, quiet=False):
     """A short recording of the exact release, cached in work/refs/.
 
     Returns the cached record -- path, where it came from, the release's exact
-    length when the source states one -- or None. Only a found reference is cached: a source that
+    length when the source states one, and for an Apple preview where in the
+    release it sits -- or None. Only a found reference is cached: a source that
     failed this run is not evidence that none exists, so a miss is asked again
     next time. Each failure is printed, never folded into "not found"."""
     key = f"{row['Artist']} :: {row['Name']}"
@@ -1284,7 +1320,8 @@ def reference(row, want, quiet=False):
                 continue
             exact = h.get("dur") if h.get("exact", True) else None
             rec = {"path": str(dst), "source": h["source"], "via": h["via"], "url": h["url"],
-                   "page": h.get("page"), "dur": exact, "secs": round(got, 2)}
+                   "page": h.get("page"), "dur": exact, "secs": round(got, 2),
+                   "window": apple_window(exact) if h["source"] == "apple" else None}
             idx = _load_refs()
             idx[key] = rec
             REFS_INDEX.write_text(json.dumps(idx, ensure_ascii=False, indent=1))
@@ -3402,9 +3439,18 @@ def main():
                             prefetched = cand
                         else:
                             shown = f"{eff:.0f}s (Δ{eff - want:+.0f}s)" if eff else "не измерился"
-                            print(f"      чистого звука {shown} — другой монтаж")
-                            cand.unlink(missing_ok=True)
-                            wrong_cut = True
+                            R = ref()
+                            # Longer than the release is not by itself a different
+                            # cut: a release can BE a cut of a longer piece, and an
+                            # Apple preview says where -- see `apple_window`.
+                            if eff and eff > want and R and R.get("window") is not None and R.get("dur"):
+                                print(f"      чистого звука {shown} — длиннее релиза, "
+                                      f"эталон покажет, где он внутри")
+                                prefetched = cand
+                            else:
+                                print(f"      чистого звука {shown} — другой монтаж")
+                                cand.unlink(missing_ok=True)
+                                wrong_cut = True
                             # Text must never outvote the audio: a candidate the
                             # measurement rejected cannot stay above the import bar.
                             sc = min(sc, a.min_score - 1)
@@ -3420,12 +3466,13 @@ def main():
                 # downloaded and judged by it instead of handed to a person.
                 low = sc < a.min_score
                 if low and wrong_cut and ref():
-                    # Already downloaded and measured, and the length is wrong.
-                    # The audio cannot rescue that, so do not fetch it twice.
+                    # Already downloaded and measured: the length is wrong and
+                    # nothing says where a release would sit inside it. The
+                    # audio cannot rescue that, so do not fetch it twice.
                     st[key] = {"status": "review", "url": url, "score": sc, "cand": e.get("title"),
                                "uploader": e.get("uploader"), "want": want,
                                "cand_dur": e.get("duration"), "src": prov,
-                               "why": "другой монтаж: длина не та",
+                               "why": "другой монтаж: длина не та, обрезать не по чему",
                                "secs": round(time.monotonic()-t0,1)}
                     continue
                 if low and not a.dry_run and prov != "manual" and ref():
@@ -3474,7 +3521,8 @@ def main():
                         f.unlink(missing_ok=True)
                         raise RuntimeError("длительность скачанного файла не измерилась")
                     # Ask the reference, when there is one. Before the length
-                    # check, because the answer changes what the length means.
+                    # check, because the answer can CHANGE the length: a match
+                    # that sits inside a longer file says where the release is.
                     R = ref()
                     verdict = compare_audio(R["path"], f) if R else None
                     if verdict:
@@ -3491,6 +3539,25 @@ def main():
                         else:
                             f.unlink(missing_ok=True)
                             raise AudioMismatch(f"звук не совпал с эталоном: волна {verdict['wave']:.2f}")
+                    trim = e.get("trim")
+                    if (not trim and got - want > DUR_TOLERANCE and verdict and verdict["same"]
+                            and R.get("window") is not None and R.get("dur")):
+                        # Apple's preview starts at a known point of the release,
+                        # so where it sits in this file is where the release
+                        # starts. Reconstructed this way by hand once, verified
+                        # against Apple's own audio: `Creelles Town` is the first
+                        # 72.051s of a 120s rip.
+                        start = verdict["lag"] - R["window"]
+                        if start > -0.5 and start + R["dur"] <= got + 0.5:
+                            trim = [round(max(start, 0.0), 3), round(max(start, 0.0) + R["dur"], 3)]
+                            print(f"      релиз — отрезок [{trim[0]}:{trim[1]}] этого файла "
+                                  f"(превью Apple начинается с {R['window']:.0f}s релиза)")
+                    if trim:
+                        cut(f, *trim)
+                        got = effective_duration(f)
+                        if got is None:
+                            f.unlink(missing_ok=True)
+                            raise RuntimeError("после обрезки длительность не измерилась")
                     if verdict and verdict["same"] and got < want - DUR_TOLERANCE:
                         # Silence is part of the release. `Капитан Джек Воробей`
                         # matched its reference at 1.00 and was still rejected:
@@ -3512,7 +3579,7 @@ def main():
                     if low and not (verdict and verdict["same"]):
                         f.unlink(missing_ok=True)
                         raise AudioMismatch("эталон есть, но сравнить не удалось — без него ниже порога")
-                    src_url = url
+                    src_url = url + (f" [{trim[0]}:{trim[1]}]" if trim else "")
                     if a.audition:
                         f.unlink(missing_ok=True)
                         print(f"      ПРОСЛУШКА: импортировал бы{' по звуку' if low else ''} "
@@ -3544,6 +3611,8 @@ def main():
                                "secs": round(time.monotonic()-t0,1)}
                     if verdict:
                         st[key]["audio"] = {**verdict, "ref": R["via"], "ref_page": R.get("page")}
+                    if trim:
+                        st[key]["trim"] = trim
                     print(f"      ADDED  art={art_src} parked={parked} plays={plays} "
                           f"({time.monotonic()-t0:.0f}s)")
                     handled = True

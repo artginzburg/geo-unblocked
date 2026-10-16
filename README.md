@@ -119,7 +119,7 @@ something was lost without it.
 
 | file | keyed by | for |
 |---|---|---|
-| `data/track_sources.json` | `Artist :: Track` | a source approved for one track, no score gate |
+| `data/track_sources.json` | `Artist :: Track` | a source approved for one track, no score gate; optionally `{"url": …, "trim": [start, end]}` when the release is a cut of it |
 | `data/album_sources.json` | album name | a whole release, when search cannot find it |
 | `data/artwork_sources.json` | `Artist :: Track` | one cover: an image URL, or a Spotify link |
 
@@ -191,6 +191,15 @@ every number comes with its own background. Measured on known answers:
 The bar is 0.85. A candidate the text checks would have parked — another
 artist's name, a translated title — is downloaded and judged this way instead,
 and imported when it matches. Without a reference, the text rules stand.
+
+**A release can be a cut of something longer, and the tool finds the cut.**
+Apple's preview starts at a fixed point of the release — measured on one album:
+45s into a track of 75s or more, 30s into a 60–75s track, the whole of a track
+under 30s. So where Apple's preview sits in a longer file says where the release
+starts; for lengths nobody has measured, the tool does not guess.
+`Creelles Town` is a 72s release cut from a 120s piece, and the tool derives
+`[0:72.052]` on its own. A cut can also be named in `track_sources.json` as
+`"trim": [start, end]`.
 
 **`--audition`** runs all of this for one or more rows, including ones already
 done, and stops short of the library: it searches, downloads, compares and
