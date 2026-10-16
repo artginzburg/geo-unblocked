@@ -143,6 +143,50 @@ page that looks like an empty result. Over a couple of hundred tracks it will be
 blocked long before the end, so the hand-named map is still the reliable route
 for the tail.
 
+## When the tool finds nothing: hunting a track by hand
+
+"Not found" from the tool means "not found by its searches", not "gone". In one pass
+over 25 dead tracks, five were first written off as withdrawn from every platform;
+three of those then turned up once the sources that had *refused* were asked again.
+What actually worked, in the order worth trying:
+
+1. **Get a reference recording first.** A 30-second preview is enough to tell the
+   right file from a lookalike, and it usually survives the track's removal:
+   - Apple's preview stays on its CDN after the track leaves the catalogue. Its URL
+     (`audio-ssl.itunes.apple.com/…plus.aac.p.m4a`) is in any Wayback Machine snapshot
+     of the album page — query the CDX index by the exact page prefix,
+     `music.apple.com/us/album/<slug>*`, not by domain.
+   - `https://genius.com/songs/<song id>/apple_music_player` embeds the same Apple
+     preview URL, even when Wayback never captured the album page.
+   - A Wayback snapshot of a Spotify track page holds its `p.scdn.co/mp3-preview/…`
+     URL, which also keeps working.
+   - Deezer's API returns a `preview` field for tracks that are still listed.
+2. **Compare audio, not titles.** Slide the preview along each candidate: same
+   recording peaks at 0.9+, a different take or a cover sits well below. Calibrate
+   first — preview against itself, and against a known-wrong track of the same
+   length. When candidates disagree only subtly, correlate the waveform in short
+   segments: that catches pitch-shifted and re-encoded copies a loudness comparison
+   misses.
+3. **Look where the same recording lives under another name.** Budget labels publish
+   one master under several invented artists; distributors re-release a single on a
+   compilation; a "removed" EP may be a re-delivery still on sale in other countries.
+   The reference identifies it regardless of credits.
+4. **Ask the sources that refused, again — and tell refusals from absences.** HTTP
+   403/418/429/451 and bot challenges are a "no" from the site, not from the
+   catalogue. Some of them need a real browser, a VPN to another country, or a
+   logged-in account.
+5. **User-upload catalogues hold what stores dropped.** Mail.ru (use `https://`),
+   mp3party (needs a `Range` header; a 29-byte `failed to get file info` means the
+   listing exists but the file is not stored), and VK, whose search only works when
+   logged in.
+6. **Check the artist's own site.** One withdrawn album was a free lossless download
+   on the musician's own page.
+
+The tool cannot buy, sign in or get past DRM. When a track exists only behind an
+account, a purchase or a subscription stream, it reports where, and the rest is a
+person's call. A verified source goes into `data/track_sources.json`, and the next
+run imports it with history like any other track.
+
 ## Artwork sources, in descending order of trust
 
 | source | verified on | notes |

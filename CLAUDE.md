@@ -633,6 +633,32 @@ the user heard a track with nothing on screen to explain it — only macOS's Now
 Playing showed it. Agents get audio with curl/yt-dlp; a browser tab is for
 reading and is closed afterwards.
 
+### VK has what the stores dropped, and an agent cannot take it
+
+Logged into VK in the built-in browser (by the user — never by an agent), audio
+search on 2026-10-16 found three of the seven tracks every other source lacked:
+`maru nara — i get down` at exactly 1:32, `Sigma (feat. ПодлецМерзавец, Nutakoe)`
+at 3:19 inside a 267-track fan playlist, and `Dead Confederate — Guns` at 4:58
+(three seconds short of the 301s master — check it against the AthFest preview
+before trusting it). VK's guest view shows nothing; the search needs a session.
+
+Getting the file out is where it stops. The safety classifier blocked both routes,
+the second even after the user approved it in chat:
+
+- minting a web API token from the session (`login.vk.ru/?act=web_token`) —
+  "credential materialization";
+- reading the stream URL the player had requested, from the page's resource
+  entries — "security weaken".
+
+Do not look for a third route; that is working around the block. The user can save
+the files himself (VK has no download button; a browser extension does it) into
+`~/Downloads`, and the tool's part — verify against the reference, import with
+history — is unchanged. Two more things learned the hard way: VK's new UI keeps the
+results in React state (no `data-audio` attributes, nothing in the HTML), and its
+web page fires thousands of requests, so the network buffer drops a stream request
+within seconds. Muting a player before pressing play takes patching
+`HTMLMediaElement` — its volume control does not exist until something plays.
+
 ## Verified discovery beats a trusted caption
 
 Spotify covers can be reached with no account: search for the release, take the
