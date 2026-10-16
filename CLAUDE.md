@@ -542,6 +542,23 @@ and gain unchanged to 0.0 dB. The exact copy is therefore `rip[0:72.051]` —
 reconstructed, not found, and verified against Apple's own audio for 30 of its
 72 seconds.
 
+It was imported by hand on 2026-10-16 through the module's own `tag`,
+`park_original`, `add_to_music`, `inherit_history` and `apply_export_history`,
+in the main loop's order, with the comment naming the cut
+(`3pUhABVI0Xs [0:72.051, …]`) and the cover named in `artwork_sources.json`.
+**The recipe is not reproducible by the tool:** `track_sources.json` takes a
+URL and nothing says "the first 72.051s of it", so a clean pass that purges our
+imports would lose this track and then park the 120s rip as a different edit.
+The recipe lives in `state.json`'s note for that row and in this paragraph.
+If a second track ever needs the same, that is the time to give
+`track_sources.json` an optional trim, not before.
+
+`add_to_music` failed once on this import with `-1700 Can't make some data into
+the expected type` and succeeded on an identical retry seconds later, returning
+the same track id twice (no duplicate). It happened right after a `music://` URL
+had been opened in Music; the likeliest reading is that Music was busy, not that
+the path was wrong.
+
 The obvious next use: tracks parked with a plausible candidate and nothing to
 check it against — `Hobart Ocean :: Confidential Liar (Live)` has a 2010 live
 video and no reference at all.
