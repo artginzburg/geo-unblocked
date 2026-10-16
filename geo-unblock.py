@@ -73,7 +73,7 @@ RENDITION = ("cover", "remix", "live", "karaoke", "reaction", "sped up",
 # near-tie, it must never outweigh duration or artist evidence. Without it, "No
 # Fun" imported at 96k from SoundCloud while a 240k copy of the same 134s master
 # sat one rank below, against a library original of 256k.
-PROVIDER_QUALITY = {"mr": 4, "ytm": 3, "yt": 2, "sc": 0}
+PROVIDER_QUALITY = {"mr": 4, "ytm": 3, "yt": 2, "mp": 1, "sc": 0}
 # SoundCloud has no equivalent of a `- Topic` channel: an account name is
 # self-declared, so "uploader matches the artist" is not provenance there -- a
 # fan cover of Sex Bob-Omb's "Threshold" was posted by an account named
@@ -550,9 +550,94 @@ def pick_from_album(row, want_dur, min_score):
     return best if best and best[0] >= min_score else None
 
 
+MP3PARTY = "https://mp3party.net"
+# A file mp3party is known to store: `Bass Boosted :: Pyrotex`, imported from it
+# on 2026-10-16. Asked beside a candidate that comes back empty, it tells "this
+# listing has no file" from "this address is refused" -- the two give the same
+# 29-byte answer.
+MP3PARTY_CONTROL = "https://dl2.mp3party.net/online/8982205.mp3"
+
+
+def search_mp3party(query, n=6):
+    """mp3party.net: a user-upload catalogue, like Mail.ru, and it held a track
+    no other source did (`Bass Boosted :: Pyrotex`, 188.000s). Its search page
+    carries artist, title, length and the file URL in the markup, so one request
+    answers a query. Tags are whatever the uploader typed: the delivered file
+    decides, as for every source."""
+    import html, urllib.parse
+    try:
+        code, body = _http(f"{MP3PARTY}/search?q=" + urllib.parse.quote_plus(query), timeout=30)
+    except Exception as ex:
+        # A wall, not an empty catalogue -- say so and count it like any refusal.
+        print(f"      mp: поиск не ответил ({str(ex)[:60]})", flush=True)
+        REFUSALS["mp"] = REFUSALS.get("mp", 0) + 1
+        return []
+    text = body.decode("utf-8", "replace")
+    out = []
+    for blk in text.split('class="track song-item"')[1:]:
+        m = re.search(r'data-js-artist-name="([^"]*)".*?data-js-song-title="([^"]*)"'
+                      r'.*?data-js-url="([^"]*)"', blk, re.S)
+        d = re.search(r'track__info-item">\s*(\d+):(\d\d)\s*<', blk)
+        if not (m and d):
+            continue
+        artist, title = html.unescape(m.group(1)), html.unescape(m.group(2))
+        out.append({"duration": int(d.group(1)) * 60 + int(d.group(2)),
+                    # Mail.ru's shape: the credit lives in the title, and the
+                    # uploader -- unknown here -- is no provenance at all.
+                    "title": f"{artist} - {title}", "uploader": "",
+                    "url": m.group(3), "thumbnails": []})
+    return out[:n]
+
+
+_MP3PARTY_CONTROL_OK = None
+
+
+def _mp3party_get(url):
+    """The file, or None for mp3party's 29-byte `failed to get file info: nil`.
+    It serves a file only to a request carrying `Range: bytes=0-`; without it,
+    or with any other range, a stored file gets the same 29 bytes."""
+    code, body = _http(url, timeout=120, headers={"Range": "bytes=0-",
+                                                   "Referer": MP3PARTY + "/"})
+    if body.startswith(b"failed to get file info"):
+        return None
+    if code not in (200, 206) or len(body) < 100_000:
+        raise RuntimeError(f"mp3party: HTTP {code}, {len(body)} байт")
+    return body
+
+
+def fetch_mp3party(url, out_base):
+    global _MP3PARTY_CONTROL_OK
+    raw, m4a = Path(f"{out_base}.mp3"), Path(f"{out_base}.m4a")
+    for p in (raw, m4a):
+        p.unlink(missing_ok=True)
+    body = _mp3party_get(url)
+    if body is None:
+        if _MP3PARTY_CONTROL_OK is None:
+            try:
+                _MP3PARTY_CONTROL_OK = _mp3party_get(MP3PARTY_CONTROL) is not None
+            except Exception:
+                _MP3PARTY_CONTROL_OK = False
+        if _MP3PARTY_CONTROL_OK:
+            # The site answered about THIS listing: there is no file behind it.
+            raise RuntimeError("mp3party: листинг есть, файла нет")
+        # The control file is stored, and it was refused too: the site is
+        # saying no to this address, not to this track. Out for the run.
+        REFUSALS["mp"] = DEAD_AFTER
+        raise Refused("mp3party отказывает этому адресу — даже контрольный файл не отдан")
+    raw.write_bytes(body)
+    # The same conversion yt-dlp's `-x --audio-format m4a` gives every other
+    # mp3 source, so all imports reach Music in one container.
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(raw), "-vn", "-c:a", "aac",
+                    "-b:a", "256k", str(m4a)], check=True, timeout=300)
+    raw.unlink(missing_ok=True)
+    return m4a
+
+
 def search(query, provider, n=6):
     if provider == "ytm":
         return search_ytm(query, n)
+    if provider == "mp":
+        return search_mp3party(query, n)
     if provider == "mr":
         # Mail.Ru has no search prefix, only a search URL -- and yt-dlp chokes on
         # raw Cyrillic in a URL (latin-1 encode error), so it must be escaped here.
@@ -784,6 +869,8 @@ def fetch(url, out_base, attempts=3):
     # keyed on artist+title, never on the url -- so a rejected download from an
     # earlier attempt would be imported and stamped with a different source.
     Path(f"{out_base}.m4a").unlink(missing_ok=True)
+    if "mp3party.net/" in url:
+        return fetch_mp3party(url, out_base)
     # After a few hundred downloads YouTube starts answering "Sign in to confirm
     # you're not a bot" from this address, and the default client has no way
     # past it. Asking as the embedded player does, and it hands over the same
@@ -3252,7 +3339,9 @@ def main():
     # YouTube first: Topic channels carry label-delivered audio. SoundCloud next,
     # then Mail.Ru -- a user-upload catalogue that is often the only place old and
     # obscure Russian material still exists.
-    providers = ["yt"] if a.no_soundcloud else ["yt", "sc", "mr", "ytm"]
+    # mp3party after Mail.ru: the same kind of catalogue, one request a query,
+    # and ytm stays last because it is the slow one.
+    providers = ["yt"] if a.no_soundcloud else ["yt", "sc", "mr", "mp", "ytm"]
     DEST.mkdir(parents=True, exist_ok=True)
     # Only when something is actually going to be imported. Creating playlists
     # was unconditional, so `--report` -- a command whose whole job is to look

@@ -626,12 +626,21 @@ of the five "gone from every platform" verdicts fell:
 - `Bass Boosted :: Pyrotex` sat on mp3party at 188.000s; the "missing" 4.3s of
   the only copy found before were the release's trailing silence.
 
-**mp3party serves a file only with a `Range` header** (yt-dlp sends one; a bare
-curl gets 29 bytes, `failed to get file info: nil`). **And that same 29-byte
-answer also means "listed but not stored"**: on the same host some ids return
-the full file and others never do, cookies and Referer notwithstanding — the
-listing for `MARU NARA :: I GET DOWN` exists and its file does not. Test a
-known-good id beside the candidate before calling it an IP block.
+**mp3party serves a file only with `Range: bytes=0-`** -- exactly that; no
+header and `bytes=0-63` both get the same 29 bytes, `failed to get file info:
+nil`. **And that same 29-byte answer also means "listed but not stored"**: on
+the same host some ids return the full file and others never do, cookies and
+Referer notwithstanding -- the listing for `MARU NARA :: I GET DOWN` exists and
+its file does not. Test a known-good id beside the candidate before calling it
+an IP block.
+
+That test is now the provider's (`fetch_mp3party`, control id 8982205, the
+Pyrotex file). Measured at 19:10 the same day, it was needed at once: every id
+tried -- Pyrotex itself, which had been downloaded hours earlier, and five
+random popular ones -- got the 29 bytes, from curl and from a real browser on
+the same address (`<audio>` error 4). So the provider reports "this address is
+refused" and leaves the run, rather than writing "no file" against a track.
+HEAD answers `200 audio/mpeg` either way, so it proves nothing.
 
 **The built-in browser plays through the user's speakers, with no window.** An
 agent opened an mp3party page there to check Pyrotex, the page autoplayed, and

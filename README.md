@@ -80,7 +80,7 @@ worse: it has no `Favorited` column, and the favourite flag has no other backup.
    a playable subscription copy needs nothing — it was swapped by hand at some
    point and the dead entry never got cleaned up.
 2. **Finds the audio.** A source named by hand first, then a named release, then
-   searches — YouTube, SoundCloud, Mail.Ru, YouTube Music — strictly as
+   searches — YouTube, SoundCloud, Mail.Ru, mp3party, YouTube Music — strictly as
    fallbacks, stopping at the first match good enough to import unattended.
 3. **Verifies by duration**, asymmetrically. Within ±4s of Apple's length is
    accepted. *Shorter* is rejected outright: audio the original had is missing.
@@ -216,7 +216,9 @@ sits behind something the tool does not do, and it says which:
 
 - **A source that refuses** — HTTP 403/429, a CAPTCHA, YouTube's sign-in wall —
   is reported as a refusal and dropped for the rest of the run, not counted as
-  an absence.
+  an absence. mp3party, for one, refuses some addresses outright; the tool asks
+  for a file it knows is stored before deciding whether a missing file is the
+  listing's fault or the address's.
 - **VK** holds tracks no store does, but its search needs a signed-in session,
   and the tool does not sign in.
 - **A store purchase or a stream** it cannot use: it reports when the record is
