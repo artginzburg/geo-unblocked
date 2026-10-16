@@ -168,7 +168,7 @@ leaves every storefront.
 | Deezer | its 30s preview | `Сатана Печёт Блины :: Sigma` |
 | Genius | the Apple preview of the track it linked, plus the exact length | `MARU NARA :: I GET DOWN`, whose album was re-delivered without it |
 | Wayback Machine, Apple pages | every preview an archived album or song page listed | `405Okced :: Creelles Town`, captured 2024 |
-| Spotify | the public embed page's preview; for a restricted track, an archived copy of its page | — |
+| Spotify | the public embed page's preview; for a restricted track, an archived copy of its page | `The Imperas :: Twin Peaks Theme` |
 
 A reference is accepted only when its own artist, title and length match the
 library entry, and is cached in `work/refs/`. A source that failed is reported as
@@ -184,6 +184,8 @@ every number comes with its own background. Measured on known answers:
 | three independent uploads of `Summertime` | 0.97–1.00 | same recording |
 | `Summertime` pitch-shifted by −12 cents | 0.04 | rejected, though its loudness contour matched at 0.80 |
 | Beck's own mix of `Summertime` | 0.25 | rejected |
+| `Twin Peaks Theme` as `Spirit` — a pseudonym release of the same master | 1.00 | same recording |
+| the same theme reissued 1% faster as `The One World Ensemble` | 0.16 | rejected, though it *sounds* identical |
 | a cover of `Sigma` sung over the original backing track | 0.69 | rejected |
 | wrong songs of the right length | 0.01–0.05 | rejected |
 | background (wrong offsets) | 0.02–0.06 | |
@@ -191,6 +193,11 @@ every number comes with its own background. Measured on known answers:
 The bar is 0.85. A candidate the text checks would have parked — another
 artist's name, a translated title — is downloaded and judged this way instead,
 and imported when it matches. Without a reference, the text rules stand.
+
+When nothing else matches, the tool asks Apple and Deezer which **other
+artists** have a track of this title at this length — budget labels publish one
+master under several invented names — and searches under those names too.
+Whatever that finds is admitted by the audio or not at all.
 
 **A release can be a cut of something longer, and the tool finds the cut.**
 Apple's preview starts at a fixed point of the release — measured on one album:

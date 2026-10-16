@@ -1345,6 +1345,37 @@ REF_SOURCES = (("itunes", _ref_itunes), ("deezer", _ref_deezer), ("genius", _ref
                ("wayback", _ref_wayback_apple), ("spotify", _ref_spotify))
 
 
+def aliases(row, want, n=4):
+    """Other artists the catalogues credit with this title at this length.
+
+    Budget labels issue one master under several invented names, and no query
+    keyed on the library's artist reaches the others: `The Imperas :: Twin Peaks
+    Theme` is also `Spirit`, `The One World Ensemble` and -- to Apple's own
+    matcher -- `Paul Brooks`, and 60 results deep a title search on YouTube
+    surfaces none of them under the famous original. Apple's catalogue does
+    list them, by title and length. These names are leads only: whatever they
+    turn up is admitted by the reference or not at all. Closest length first."""
+    base = base_title(row["Name"])
+    wt, own = tokens(base), tokens(row["Artist"]) - _ARTIST_STOP
+    found = {}
+
+    def consider(artist, title, dur):
+        if (dur and abs(dur - (want + 0.5)) <= DUR_TOLERANCE and wt and wt <= tokens(title)
+                and not (own & (tokens(artist) - _ARTIST_STOP))):
+            found[artist] = min(found.get(artist, 99), abs(dur - want - 0.5))
+
+    for r in itunes(base, "song", limit=200):
+        consider(r.get("artistName", ""), r.get("trackName", ""), (r.get("trackTimeMillis") or 0) / 1000)
+    try:
+        import urllib.parse
+        _, body = _http("https://api.deezer.com/search?limit=100&q=" + urllib.parse.quote(base))
+        for x in jload(body.decode("utf-8", "replace")).get("data", []) or []:
+            consider(x["artist"]["name"], x["title"], x.get("duration"))
+    except Exception as ex:
+        print(f"      Deezer не ответил ({str(ex)[:60]}) — псевдонимы только из Apple", flush=True)
+    return sorted(found, key=found.get)[:n]
+
+
 def apple_window(dur):
     """Where in the release Apple's 30s preview starts, from the release length.
 
@@ -1577,7 +1608,7 @@ def account_storefront():
 STORE = account_storefront()
 
 
-def itunes(term, entity, country=None):
+def itunes(term, entity, country=None, limit=25):
     """Search the configured storefront AND `us`, merged.
 
     Not "one, then the other if empty": a storefront answering with the wrong
@@ -1594,7 +1625,7 @@ def itunes(term, entity, country=None):
     out, seen = [], set()
     for c in dict.fromkeys([f"country={country}" if country else STORE, "country=us"]):
         url = (f"https://itunes.apple.com/search?term={urllib.parse.quote(term)}"
-               f"&entity={entity}&limit=25&{c}")
+               f"&entity={entity}&limit={limit}&{c}")
         res = []
         # Apple throttles with HTTP 403 after a burst, and an unretried 403 is
         # returned here as an empty list -- the same value that means "this
@@ -3489,6 +3520,7 @@ def main():
         # sat unused in the same result set. That one was ours to fix and is
         # fixed; the shape of the failure is not rare, so the loop stays.
         handled = False
+        aliased = False
         tried = set()
         # A named release is the answer, not a guess to be widened past.
         widened = bool(vouched)
@@ -3732,19 +3764,40 @@ def main():
             # failed to get, and the score -- including a LOW CONFIDENCE one
             # reached only because the better candidates would not download -- is
             # the wrong thing to end the search on.
-            if handled or widened or not (tried or skipped):
+            if handled or not (tried or skipped):
                 break
-            # The ranking was never the problem: the providers pick() skipped
-            # were simply never asked.
-            widened = True
-            wider = pick(row["Name"], row["Artist"], want, providers,
-                         row.get("Album", ""), a.min_score, exhaustive=True)
-            cands = [c for c in wider
-                     if (c[1].get("url") or c[1].get("webpage_url")) not in tried]
+            if not widened:
+                # The ranking was never the problem: the providers pick() skipped
+                # were simply never asked.
+                widened = True
+                wider = pick(row["Name"], row["Artist"], want, providers,
+                             row.get("Album", ""), a.min_score, exhaustive=True)
+                cands = [c for c in wider
+                         if (c[1].get("url") or c[1].get("webpage_url")) not in tried]
+                if cands:
+                    print(f"      ни один кандидат не скачался — добираю остальные "
+                          f"источники ({len(cands)} новых)")
+                    continue
+            # Last round, and only with a reference to judge by: the same
+            # recording under another credit. Never past a named source -- that
+            # is the answer, not a guess. Every candidate is held below the bar,
+            # so nothing found here can import on text: its score was earned
+            # against the ALIAS's name, not this row's.
+            if aliased or vouched or a.dry_run or not ref():
+                break
+            aliased = True
+            alts = aliases(row, want)
+            if not alts:
+                break
+            print(f"      ищу ту же запись под другими именами: {', '.join(alts)}")
+            cands = []
+            for alt in alts:
+                best = [c for c in pick(base_title(row["Name"]), alt, want, ["yt", "sc", "mr"],
+                                        "", a.min_score)
+                        if (c[1].get("url") or c[1].get("webpage_url")) not in tried][:1]
+                cands += [(min(sc, a.min_score - 1), e, prov) for sc, e, prov in best]
             if not cands:
                 break
-            print(f"      ни один кандидат не скачался — добираю остальные "
-                  f"источники ({len(cands)} новых)")
         save(st)
 
     ok = sum(1 for v in st.values() if v.get("status") == "ok")

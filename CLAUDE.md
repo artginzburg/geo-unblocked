@@ -523,7 +523,9 @@ a sharp peak at a definite offset. Measured on three tracks, 2026-10-16:
   **`Spirit - Topic`** upload at **0.97**, at offset 75.5s, and an independent
   `The One World Ensemble` upload at **0.97** at the same offset, while three
   other uploads of a song by that title scored 0.48, 0.32 and 0.20. Durations
-  agree to 15ms (150.706 against 150.721).
+  agree to 15ms (150.706 against 150.721). **Those 0.97s were envelope
+  scores**, and the waveform splits them -- see "Same performance, different
+  speed" below: Spirit 1.00, the One World Ensemble and Paul Brooks copies 0.16.
 - `Сатана Печёт Блины :: Sigma` — the Deezer preview against the one plausible
   candidate: **0.68**, against a different track of the same length **0.18**,
   against itself shifted **1.000**. 0.68 is not a re-upload; it is the cover the
@@ -694,8 +696,10 @@ account's store), and Spotify (the public embed page, which carries name,
 artists, length and `audioPreview` with no account, and an archived copy of the
 track page when the track is restricted). Found on the first run, 2026-10-16:
 Sigma from Deezer, I GET DOWN from Genius, Summertime and Guns from Apple's API,
-Creelles Town from Wayback. Twin Peaks, Marked Bills and Confidential Liar need
-Spotify, and Brave was answering 429 all session.
+Creelles Town from Wayback, Капитан Джек Воробей from Deezer, Twin Peaks from
+Spotify's embed page. Marked Bills and Confidential Liar need Spotify too, and
+Brave -- the only engine that serves Spotify links -- allowed one query in an
+hour; Confidential Liar is restricted with no archived capture at all.
 
 Only a found reference is cached. A miss is asked again next run, because a
 source that failed is not evidence that no reference exists.
@@ -731,6 +735,38 @@ uploader sang over the **original backing track** -- part of the file is the
 master. A bar at 0.6, the first guess, let it through. `WAVE_SAME` is **0.85**:
 above every contaminated copy measured, below every genuine one (0.97+) and the
 AthFest Guns pair (0.91).
+
+**Same performance, different speed: the budget reissue.** Twin Peaks settled
+what the envelope cannot. Against the Imperas preview (fetched by the tool from
+Spotify's embed page, given the track id `76kg99LPFtuyFUYyW6zdw3`; Brave was
+answering 429 all session, so the link could not be discovered):
+
+| upload | length | envelope | waveform |
+|---|---|---|---|
+| `Spirit - Topic` | 151s | 0.72 | **1.00** |
+| `The New World Ensemble - Topic` | 150s | 0.97 | 0.16 |
+| `Paul Brooks - Topic` | 148s | 0.96 | 0.16 |
+| `Sheet Music Boss`, `Dominik Hauser` (re-recordings) | 151-152s | 0.33-0.39 | 0.02-0.05 |
+
+The One World Ensemble release runs 149.227s against the Imperas' 150.706s --
+one percent, about 17 cents. It is the same master resampled, which is what the
+pitch-shifted Summertime copy was too, and it is rejected for the same reason.
+Note what that means for the import already in the library: Apple *matched* it
+to `Paul Brooks — Theme from "Twin Peaks"` (see the `matched` section above), so
+the row streams Apple's copy of that reissue, not the file we gave it. Apple's
+matcher pairs performances, not lineages.
+
+**And the alias round that found them.** When a row has a reference and every
+candidate has failed, `aliases()` asks Apple (200 results, not the usual 25:
+at 25 only one of five turned up) and Deezer for the same title at the same
+length under *other* artists, searches each under that name, and holds every
+result below the bar so only the audio can admit it. On Twin Peaks it named
+`Sheet Music Boss`, `Dominik Hauser`, `The One World Ensemble`, `Paul Brooks`
+and fetched one Topic upload for each: four candidates no title search reaches
+(60 YouTube results deep for "Twin Peaks Theme" hold none of them), all four
+correctly rejected. `Spirit` is credited in neither catalogue, so the vouched
+source in `track_sources.json` stays the route to it -- and `--audition` on that
+row passes it at 1.00.
 
 **What the verdict changes in the loop.** A candidate that matches is imported
 even when its score is below the bar -- that is what reaches pseudonyms
