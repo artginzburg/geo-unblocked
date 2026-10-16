@@ -650,6 +650,18 @@ seconds; and its player has no volume control until something plays, so muting
 before pressing play takes patching `HTMLMediaElement`. The order of the rows'
 "Start listening" buttons shifts after a reload — check which row you start.
 
+**What got the files out, 2026-10-16:** the stream is HLS on `*.vkuseraudio.ru`.
+Enlarge the page's resource-timing buffer *before* pressing play
+(`performance.setResourceTimingBufferSize(1e6); performance.clearResourceTimings()`
+— VK's request flood overflows the default within seconds), press play, take the
+newest `vkuseraudio` entry — usually a segment, `…/seg-05-a2.ts?siren=1` — and
+replace the file name with `index.m3u8?siren=1`. `ffmpeg -i <that> -c copy x.ts`
+then fetches the whole track; some segments are AES-128 (`key.pub` beside them,
+`crypto+https` in the log) and ffmpeg decrypts them itself. Content was mp3
+256k in MPEG-TS. All three tracks matched their references: Guns 0.990 against
+the AthFest preview, Sigma 0.986 against Deezer's (the cover: 0.646), I GET DOWN
+0.980 against Apple's.
+
 ## Verified discovery beats a trusted caption
 
 Spotify covers can be reached with no account: search for the release, take the

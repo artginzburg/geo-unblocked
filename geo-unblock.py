@@ -854,6 +854,553 @@ def effective_duration(path):
     return dur - lead - tail
 
 
+# ---------------------------------------------------------------------------
+# Reference recordings
+#
+# A 30-second preview of the exact master is all an audio comparison needs, and
+# it is the one identifier that survives renaming: budget labels publish one
+# recording as `The Imperas`, `Spirit` and `The One World Ensemble`, and only the
+# audio says they are the same file. It also usually survives the track itself.
+# Apple's CDN keeps serving a removed track's preview; Genius's embedded player
+# and archived album pages still name it. Every route below was first walked by
+# hand on 2026-10-16 -- see "A 30-second preview is a reference recording" in
+# CLAUDE.md -- and is now the tool's job, not a person's.
+
+REFS = SCRATCH / "refs"
+REFS_INDEX = REFS / "index.json"
+
+
+def _http(url, timeout=30, tries=3, headers=None):
+    """(status, body). A 404/410 is an answer and comes back as one; anything
+    else that fails every try RAISES, because a failed fetch returned as an
+    empty body is exactly how "the network blinked" becomes "there is none"."""
+    import gzip, urllib.request, urllib.error
+    last = None
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA_BROWSER, **(headers or {})})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                body = r.read()
+                # The Wayback Machine replays an archived gzip body verbatim.
+                if body[:2] == b"\x1f\x8b":
+                    body = gzip.decompress(body)
+                return r.status, body
+        except urllib.error.HTTPError as ex:
+            if ex.code in (404, 410):
+                return ex.code, b""
+            last = ex
+        except Exception as ex:
+            last = ex
+        if i + 1 < tries:
+            time.sleep(2 * (i + 1))
+    raise RuntimeError(f"{url[:70]}: {str(last)[:80]}")
+
+
+def _ref_fits(row, want, artist, title, dur):
+    """Artist, title and length all agree -- the same bar `released_where` uses.
+
+    A reference is what every later candidate is judged against, so a wrong one
+    is worse than none: it would reject the right file and bless a lookalike.
+    `want` is truncated (Apple's export drops the fraction), so it is compared
+    against the middle of the second it names."""
+    if not dur or abs(dur - (want + 0.5)) > DUR_TOLERANCE:
+        return False
+    if not (tokens(row["Artist"]) - _ARTIST_STOP) & (tokens(artist) - _ARTIST_STOP):
+        return False
+    wt = tokens(base_title(row["Name"]))
+    return bool(wt) and wt <= tokens(title)
+
+
+def _closest(row, want, hits):
+    """Best of several fitting hits: the length inside the second the index
+    names, then the same album, then the nearest length. Two different
+    `Summertime` releases sit in the store at 129.840s and 130.733s; the index's
+    130 can only be the second."""
+    album = re.sub(r" - (Single|EP)$", "", row.get("Album") or "")
+    return sorted(hits, key=lambda h: (not (want <= h["dur"] < want + 1),
+                                       not (album and close(h.get("album") or "", album)),
+                                       abs(h["dur"] - want - 0.5)))
+
+
+def _ref_itunes(row, want):
+    hits = []
+    for r in itunes(f'{row["Artist"]} {base_title(row["Name"])}', "song"):
+        d = (r.get("trackTimeMillis") or 0) / 1000
+        if r.get("previewUrl") and _ref_fits(row, want, r.get("artistName", ""),
+                                             r.get("trackName", ""), d):
+            hits.append({"source": "apple", "via": "itunes", "url": r["previewUrl"],
+                         "dur": d, "album": r.get("collectionName"),
+                         "page": (r.get("trackViewUrl") or "").split("&uo=")[0]})
+    return _closest(row, want, hits)
+
+
+def _ref_deezer(row, want):
+    import urllib.parse
+    hits = []
+    base = base_title(row["Name"])
+    for q in (f'artist:"{row["Artist"]}" track:"{base}"', f'{row["Artist"]} {base}'):
+        _, body = _http("https://api.deezer.com/search?limit=10&q=" + urllib.parse.quote(q))
+        for x in jload(body.decode("utf-8", "replace")).get("data", []) or []:
+            if x.get("preview") and _ref_fits(row, want, x["artist"]["name"], x["title"],
+                                             x.get("duration")):
+                # Whole seconds only, so this length must never be taken as
+                # the release's exact one -- `exact` says which sources state it.
+                hits.append({"source": "deezer", "via": "deezer", "url": x["preview"],
+                             "dur": float(x["duration"]), "exact": False,
+                             "album": (x.get("album") or {}).get("title"), "page": x.get("link")})
+        if hits:
+            break
+    return _closest(row, want, hits)
+
+
+def _ref_genius(row, want):
+    """Genius keeps the Apple preview of the track it linked, in the page of its
+    embedded player, and that preview outlives the track: the only reference
+    ever found for `MARU NARA :: I GET DOWN`, whose album was re-delivered
+    without it and whose Apple page the Wayback Machine never captured. The
+    player carries title, artist and an exact length, so it is checked like any
+    store record."""
+    import html, urllib.parse
+    _, body = _http("https://genius.com/api/search/multi?q="
+                    + urllib.parse.quote(f'{row["Artist"]} {base_title(row["Name"])}'))
+    ids = []
+    for sec in jload(body.decode("utf-8", "replace")).get("response", {}).get("sections", []):
+        if sec.get("type") != "song":
+            continue
+        for h in sec.get("hits", []):
+            res = h.get("result", {})
+            if (close(res.get("primary_artist", {}).get("name", ""), row["Artist"])
+                    and tokens(base_title(row["Name"])) & tokens(res.get("title", ""))):
+                ids.append(res["id"])
+    hits = []
+    for sid in dict.fromkeys(ids):
+        _, page = _http(f"https://genius.com/songs/{sid}/apple_music_player")
+        m = re.search(r'preview_track="([^"]*)"', page.decode("utf-8", "replace"))
+        if not m:
+            continue
+        t = jload(html.unescape(m.group(1)))
+        if t.get("preview_url") and _ref_fits(row, want, t.get("artist_display_name", ""),
+                                              t.get("title", ""), t.get("duration")):
+            hits.append({"source": "apple", "via": "genius", "url": t["preview_url"],
+                         "dur": float(t["duration"]), "album": None,
+                         "page": f"https://genius.com/songs/{sid}"})
+    return _closest(row, want, hits)
+
+
+def _apple_slug(s):
+    """Apple's URL slug for a name: lowercase, every run of punctuation a single
+    hyphen, non-Latin letters kept and percent-encoded the way CDX stores them."""
+    import urllib.parse
+    s = re.sub(r"[^\w]+", "-", unicodedata.normalize("NFKC", s).lower()).strip("-_")
+    return urllib.parse.quote(s, safe="-")
+
+
+def _cdx(prefix, limit=40):
+    """Archived captures under one URL prefix, newest per URL first. By exact
+    prefix only: domain-wide queries time out."""
+    import urllib.parse
+    _, body = _http("https://web.archive.org/cdx/search/cdx?matchType=prefix&output=json"
+                    f"&filter=statuscode:200&fl=timestamp,original&limit={limit}"
+                    "&url=" + urllib.parse.quote(prefix, safe="/:%"), timeout=60, tries=2)
+    # A list, so not `jload`, which reads every non-object as "no answer" --
+    # and here that turned a found capture into none. Malformed raises.
+    rows = json.loads(body.decode("utf-8", "replace")) if body.strip() else []
+    newest = {}
+    for ts, orig in (rows[1:] if rows else []):
+        newest[orig] = max(ts, newest.get(orig, ""))
+    return sorted(((ts, o) for o, ts in newest.items()), reverse=True)
+
+
+def _walk_json(x):
+    if isinstance(x, dict):
+        yield x
+        for v in x.values():
+            yield from _walk_json(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from _walk_json(v)
+    elif isinstance(x, str) and x[:1] in "{[" and "audio-ssl" in x:
+        # The older pages keep their data as JSON strings inside JSON.
+        try:
+            yield from _walk_json(json.loads(x))
+        except Exception:
+            pass
+
+
+def _apple_page_tracks(text):
+    """(title, artist, seconds, preview url) for every track an archived Apple
+    page lists. Two layouts have been seen: the current `serialized-server-data`
+    (`title`, `artistName`, `duration` in ms, `previewUrl`) and the older
+    media-api cache (`attributes` with `name`, `durationInMillis`, `previews`)."""
+    out = []
+    for blob in re.findall(r"<script[^>]*>(.*?)</script>", text, re.S):
+        if "audio-ssl" not in blob:
+            continue
+        try:
+            data = json.loads(blob)
+        except Exception:
+            continue
+        for d in _walk_json(data):
+            if isinstance(d.get("previewUrl"), str) and d.get("title"):
+                out.append((d["title"], d.get("artistName") or "", (d.get("duration") or 0) / 1000,
+                            d["previewUrl"]))
+            a = d.get("attributes") if isinstance(d.get("attributes"), dict) else None
+            if a and a.get("name") and a.get("previews"):
+                url = (a["previews"][0] or {}).get("url")
+                if url:
+                    out.append((a["name"], a.get("artistName") or "",
+                                (a.get("durationInMillis") or 0) / 1000, url))
+    return out
+
+
+_STORE_CC = None
+
+
+def store_cc():
+    """The account storefront as the two letters Apple puts in its URLs. `STORE`
+    is a numeric id, which is all the Search API needs; page URLs need the code,
+    and every store result names it in its own link."""
+    global _STORE_CC
+    if _STORE_CC is None:
+        _STORE_CC = "us"
+        m = re.match(r"country=(\w\w)$", STORE)
+        if m:
+            _STORE_CC = m.group(1).lower()
+        else:
+            for r in itunes("love", "song"):
+                if r.get("_own_store"):
+                    m = re.search(r"apple\.com/(\w\w)/", r.get("trackViewUrl") or "")
+                    if m:
+                        _STORE_CC = m.group(1)
+                        break
+    return _STORE_CC
+
+
+def _ref_wayback_apple(row, want):
+    """An archived Apple album or song page names the preview of every track on
+    it, and the CDN still serves those previews years after the release left
+    every storefront: `405Okced :: Creelles Town`'s album page, captured
+    2024-09-10, listed 21 previews and all 21 still answered. The slug is built
+    from the library's own album and title; the ` - Single`/` - EP` suffix is
+    dropped so the prefix matches the page with or without it."""
+    album = re.sub(r" - (Single|EP)$", "", row.get("Album") or "")
+    probes = []
+    for cc in dict.fromkeys(["us", store_cc()]):
+        if album:
+            probes.append(f"music.apple.com/{cc}/album/{_apple_slug(album)}")
+        probes.append(f"music.apple.com/{cc}/song/{_apple_slug(base_title(row['Name']))}")
+    if album:
+        probes.append(f"itunes.apple.com/us/album/{_apple_slug(album)}")
+    hits = []
+    for prefix in probes:
+        for ts, orig in _cdx(prefix)[:3]:
+            _, body = _http(f"https://web.archive.org/web/{ts}id_/{orig}", timeout=60, tries=2)
+            for title, artist, dur, url in _apple_page_tracks(body.decode("utf-8", "replace")):
+                # An album page credits the album artist on its tracks only
+                # sometimes; the slug already pinned the release, so an empty
+                # credit stands in for the row's own.
+                if _ref_fits(row, want, artist or row["Artist"], title, dur):
+                    hits.append({"source": "apple", "via": "wayback", "url": url, "dur": dur,
+                                 "album": album, "page": f"https://web.archive.org/web/{ts}/{orig}"})
+            if hits:
+                return _closest(row, want, hits)
+    return hits
+
+
+_BRAVE, _DDG = {}, {}
+SPOTIFY_LINK = r"open\.spotify\.com/(?:intl-[a-z]+/)?(?:track|album)/[A-Za-z0-9]{22}"
+
+
+def brave_spotify_links(q):
+    """Spotify links Brave serves for a query, memoised for the process: Brave
+    rate-limits after a handful of queries, and artwork and the reference ask
+    the same questions. Raises on a 429 -- a block is not a result."""
+    import urllib.parse
+    if q not in _BRAVE:
+        r = subprocess.run(
+            ["curl", "-sL", "-A", UA_BROWSER, "--max-time", "25", "-w", "\n%{http_code}",
+             "https://search.brave.com/search?q=" + urllib.parse.quote(q)],
+            capture_output=True, text=True, timeout=60)
+        body, _, code = r.stdout.rpartition("\n")
+        if code.strip() == "429" or "captcha" in body[:4000].lower():
+            raise Refused("Brave ограничил запросы (429)")
+        _BRAVE[q] = ["https://" + x for x in
+                     sorted(set(re.findall(SPOTIFY_LINK, urllib.parse.unquote(body))))]
+    return _BRAVE[q]
+
+
+def ddg_spotify_links(q):
+    """Second pass: DuckDuckGo image results carry the page they came from."""
+    import urllib.parse
+    if q not in _DDG:
+        _DDG[q] = []
+        r = subprocess.run(
+            ["curl", "-s", "-A", UA_BROWSER, "--max-time", "20",
+             "https://duckduckgo.com/?q=" + urllib.parse.quote(q) + "&iax=images&ia=images"],
+            capture_output=True, text=True, timeout=40)
+        mm = re.search(r'vqd="?([\d-]+)"?', r.stdout)
+        if mm:
+            r2 = subprocess.run(
+                ["curl", "-s", "-A", UA_BROWSER, "-H", "Referer: https://duckduckgo.com/",
+                 "--max-time", "20",
+                 f"https://duckduckgo.com/i.js?l=us-en&o=json&q={urllib.parse.quote(q)}"
+                 f"&vqd={mm.group(1)}&f=,,,&p=1"],
+                capture_output=True, text=True, timeout=40)
+            try:
+                for x in jload(r2.stdout).get("results", []):
+                    _DDG[q] += ["https://" + y for y in re.findall(
+                        SPOTIFY_LINK, (x.get("url") or "") + " " + (x.get("source") or ""))]
+            except Exception:
+                pass
+    return _DDG[q]
+
+
+def _spotify_entity(kind, sid):
+    """The public embed page's own data -- no account, no API. A track gives
+    name, artists, length and `audioPreview`; an album gives its track list with
+    the same fields."""
+    _, body = _http(f"https://open.spotify.com/embed/{kind}/{sid}")
+    m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+                  body.decode("utf-8", "replace"), re.S)
+    if not m:
+        return {}
+    return (jload(m.group(1)).get("props", {}).get("pageProps", {})
+            .get("state", {}).get("data", {}).get("entity", {})) or {}
+
+
+def _wayback_spotify_preview(sid):
+    """A restricted track has no preview on Spotify today, but an archived copy
+    of its page still names `p.scdn.co/mp3-preview/…`, and that URL still
+    answers: a 2020 capture gave 30s of `Yartie :: Marked Bills`."""
+    for ts, orig in _cdx(f"open.spotify.com/track/{sid}", limit=10)[:3]:
+        _, body = _http(f"https://web.archive.org/web/{ts}id_/{orig}", timeout=60, tries=2)
+        m = re.search(r"https://p\.scdn\.co/mp3-preview/[0-9a-f]{20,}", body.decode("utf-8", "replace"))
+        if m:
+            return m.group(0), f"https://web.archive.org/web/{ts}/{orig}"
+    return None, None
+
+
+def _ref_spotify(row, want):
+    album = re.sub(r" - (Single|EP)$", "", row.get("Album") or "")
+    queries = [f"{row['Artist']} {row['Name']} spotify"]
+    if album and album != row["Name"]:
+        queries.append(f"{row['Artist']} {album} spotify")
+    links = []
+    for q in queries:
+        try:
+            links += brave_spotify_links(q)
+        except Refused as ex:
+            print(f"      {ex} — Spotify-эталон искать нечем", flush=True)
+            break
+    for q in queries:
+        links += ddg_spotify_links(q)
+    hits = []
+    for link in dict.fromkeys(links):
+        kind, sid = link.rstrip("/").split("/")[-2:]
+        e = _spotify_entity(kind, sid)
+        tracks = ([{"title": e.get("name", ""), "subtitle": ", ".join(a.get("name", "") for a in e.get("artists", [])),
+                    "duration": e.get("duration"), "audioPreview": (e.get("audioPreview") or {}).get("url"),
+                    "uri": e.get("uri") or f"spotify:track:{sid}"}]
+                  if kind == "track" else e.get("trackList") or [])
+        for t in tracks:
+            d = (t.get("duration") or 0) / 1000
+            if not _ref_fits(row, want, t.get("subtitle", ""), t.get("title", ""), d):
+                continue
+            url, page = t.get("audioPreview"), f"https://open.spotify.com/track/{t['uri'].split(':')[-1]}"
+            if not url:
+                url, wb = _wayback_spotify_preview(t["uri"].split(":")[-1])
+                page = wb or page
+            if url:
+                hits.append({"source": "spotify", "via": "spotify", "url": url, "dur": d,
+                             "album": e.get("name") if kind == "album" else None, "page": page})
+        if hits:
+            break
+    return _closest(row, want, hits)
+
+
+# Cheapest and most authoritative first. The store and Deezer answer in a
+# second; Genius in two; the Wayback Machine takes up to ten per probe; Spotify
+# discovery spends Brave queries, which run out.
+REF_SOURCES = (("itunes", _ref_itunes), ("deezer", _ref_deezer), ("genius", _ref_genius),
+               ("wayback", _ref_wayback_apple), ("spotify", _ref_spotify))
+
+
+def apple_window(dur):
+    """Where in the release Apple's 30s preview starts, from the release length.
+
+    Measured on `Creepypasta Land`, 2026-10-16: tracks of 79s and more preview
+    from 45.0s, the 72s track from 30.0s, the 25s track from 0 -- in full. That
+    is "the first of 45 and 30 that leaves room for 30 seconds", and nothing in
+    between was measured, so a length under 60s other than a full preview gets
+    no window rather than a guess."""
+    if not dur:
+        return None
+    if dur <= 30.5:
+        return 0.0
+    for s in (45.0, 30.0):
+        if s + 30 <= dur:
+            return s
+    return None
+
+
+def _load_refs():
+    try:
+        return json.loads(REFS_INDEX.read_text())
+    except Exception:
+        return {}
+
+
+def reference(row, want, quiet=False):
+    """A short recording of the exact release, cached in work/refs/.
+
+    Returns the cached record -- path, where it came from, the release's exact
+    length when the source states one, and for an Apple preview where in the
+    release it sits -- or None. Only a found reference is cached: a source that
+    failed this run is not evidence that none exists, so a miss is asked again
+    next time. Each failure is printed, never folded into "not found"."""
+    key = f"{row['Artist']} :: {row['Name']}"
+    idx = _load_refs()
+    hit = idx.get(key)
+    if hit and Path(hit.get("path", "")).exists():
+        return hit
+    REFS.mkdir(parents=True, exist_ok=True)
+    for name, fn in REF_SOURCES:
+        try:
+            found = fn(row, want)
+        except Exception as ex:
+            print(f"      эталон: {name} не ответил ({str(ex)[:70]}) — это не отсутствие", flush=True)
+            continue
+        for h in found:
+            ext = ".m4a" if ".m4a" in h["url"] else ".mp3"
+            dst = REFS / (safe(f"{row['Artist']} - {row['Name']}")[:80] + f".{h['via']}{ext}")
+            try:
+                code, body = _http(h["url"], timeout=60)
+            except Exception as ex:
+                print(f"      эталон {h['via']}: не скачался ({str(ex)[:60]})", flush=True)
+                continue
+            if code != 200 or len(body) < 20000:
+                continue
+            dst.write_bytes(body)
+            got = effective_duration(dst)
+            if not got or got < 5:
+                dst.unlink(missing_ok=True)
+                continue
+            exact = h.get("dur") if h.get("exact", True) else None
+            rec = {"path": str(dst), "source": h["source"], "via": h["via"], "url": h["url"],
+                   "page": h.get("page"), "dur": exact, "secs": round(got, 2),
+                   "window": apple_window(exact) if h["source"] == "apple" else None}
+            idx = _load_refs()
+            idx[key] = rec
+            REFS_INDEX.write_text(json.dumps(idx, ensure_ascii=False, indent=1))
+            if not quiet:
+                print(f"      эталон: {h['via']} ({rec['source']}), {got:.0f}s — {h.get('page') or h['url'][:60]}",
+                      flush=True)
+            return rec
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Comparing audio against the reference
+#
+# Two questions, two measurements, settled on 2026-10-16 (CLAUDE.md, "The RMS
+# envelope is not enough"):
+#   * the 200 ms RMS envelope answers "is this the same performance" -- and is
+#     fooled by a pitch-shifted copy, which keeps the loudness contour intact;
+#   * the 8 kHz waveform through a 3 kHz low-pass, segment by segment, answers
+#     "is this the same file lineage" -- five uploads of one master agreed at
+#     0.97-0.99 in every segment while the shifted copy read 0.00.
+# The envelope finds WHERE the preview sits; a 1 kHz waveform pass pins that to
+# the millisecond; the 8 kHz segments then decide. Each segment is also scored
+# at two deliberately wrong offsets, and that background -- the calibration the
+# hand-run method did with "against itself and against a known-wrong track" --
+# is reported beside the score.
+
+from itertools import accumulate as _acc
+from operator import mul as _mul
+
+WAVE_SAME = 0.60      # median segment correlation of one lineage; see CLAUDE.md
+WAVE_MARGIN = 0.40    # ... and this far above the background, so a loop cannot pass
+
+
+def _pcm(path, sr, lowpass):
+    import array
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-ac", "1",
+                          "-af", f"lowpass=f={lowpass}", "-ar", str(sr), "-f", "s16le", "-"],
+                         capture_output=True, timeout=600).stdout
+    a = array.array("h")
+    a.frombytes(raw[:len(raw) // 2 * 2])
+    return a
+
+
+def _scan(r, c, lo, hi):
+    """Normalised cross-correlation of `r` against `c[l:l+len(r)]` for every l
+    in [lo, hi]. Window statistics come from prefix sums over just the span
+    searched, so a long candidate costs only the lags actually asked about."""
+    import math
+    R = len(r)
+    lo, hi = max(lo, 0), min(hi, len(c) - R)
+    if R < 2 or hi < lo:
+        return []
+    mr = sum(r) / R
+    r0 = [v - mr for v in r]
+    nr = math.sqrt(sum(map(_mul, r0, r0))) or 1e-9
+    seg = c[lo:hi + R]
+    P = list(_acc(seg, initial=0))
+    Q = list(_acc(map(_mul, seg, seg), initial=0))
+    out = []
+    for l in range(hi - lo + 1):
+        var = (Q[l + R] - Q[l]) - (P[l + R] - P[l]) ** 2 / R
+        s = sum(map(_mul, r0, seg[l:l + R]))
+        out.append((lo + l, s / (nr * math.sqrt(var)) if var > 1e-6 else 0.0))
+    return out
+
+
+def compare_audio(ref_path, cand_path):
+    """Where the reference sits in the candidate, and whether it is the same file.
+
+    Returns {env, lag, wave, bg, segs, same}: `lag` is the reference's start in
+    the candidate in seconds; `same` is the verdict. None when either file is
+    too short to say anything."""
+    import math, statistics
+    r8, c8 = _pcm(ref_path, 8000, 3000), _pcm(cand_path, 8000, 3000)
+    if len(r8) < 8000 * 5 or len(c8) < len(r8):
+        return None
+    blk = 1600                                         # 200 ms at 8 kHz
+    env = lambda x: [math.sqrt(sum(map(_mul, x[i:i + blk], x[i:i + blk])) / blk)
+                     for i in range(0, len(x) - blk + 1, blk)]
+    er, ec = env(r8), env(c8)
+    scan = _scan(er, ec, 0, len(ec) - len(er))
+    if not scan:
+        return None
+    lag_b, env_best = max(scan, key=lambda x: x[1])
+
+    # 1 kHz waveform pass: from the envelope's +-0.2s to the millisecond.
+    r1, c1 = _pcm(ref_path, 1000, 400), _pcm(cand_path, 1000, 400)
+    fine = _scan(r1, c1, lag_b * 200 - 300, lag_b * 200 + 300)
+    lag1 = max(fine, key=lambda x: x[1])[0] if fine else lag_b * 200
+
+    seg, slack = 5 * 8000, 40                           # 5 s segments, +-5 ms
+    segs, bgs = [], []
+    for s0 in range(0, len(r8) - seg + 1, seg):
+        part = r8[s0:s0 + seg]
+        at = lag1 * 8 + s0
+        got = _scan(part, c8, at - slack, at + slack)
+        if not got:
+            continue
+        segs.append(max(v for _, v in got))
+        for wrong in (int(0.37 * 8000), -int(0.53 * 8000)):
+            b = _scan(part, c8, at + wrong - slack, at + wrong + slack)
+            if b:
+                bgs.append(max(v for _, v in b))
+    if not segs:
+        return None
+    wave = statistics.median(segs)
+    bg = statistics.median(bgs) if bgs else 0.0
+    return {"env": round(env_best, 3), "lag": round(lag1 / 1000, 3), "wave": round(wave, 3),
+            "bg": round(bg, 3), "segs": [round(x, 2) for x in segs],
+            "same": wave >= WAVE_SAME and wave - bg >= WAVE_MARGIN}
+
+
 # The storefront every itunes.apple.com lookup runs against.
 #
 # macOS's `AppleLocale` is an OS region setting and NOT the Apple Media Services
@@ -1937,7 +2484,13 @@ def add_to_music(path):
     # double quote, and the script would not even compile -- so that track could
     # never be imported, by any number of retries.
     esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
-    scr = f'tell application "Music" to add POSIX file "{esc(str(path))}"'
+    # The file reference is built OUTSIDE the tell block. Written as
+    # `tell application "Music" to add POSIX file "…"`, Music itself resolves the
+    # `POSIX file` and intermittently answers -1700 "Can't make some data into the
+    # expected type": four refusals on 2026-10-16 (Creelles Town once, Guns three
+    # times in a row), and the same path added as an alias succeeded every time.
+    scr = (f'set a to (POSIX file "{esc(str(path))}") as alias\n'
+           f'tell application "Music" to add a')
     r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip())
