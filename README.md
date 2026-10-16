@@ -316,27 +316,31 @@ proving which file is the right recording, and the proof is the release's own
 it while the track is still alive:
 
 ```bash
-./scripts/install-nightly.sh            # once; --uninstall removes it
+./scripts/install-weekly.sh             # once; --uninstall removes it
 ```
 
-That installs a launchd job (daily at 4:00, `GEO_UNBLOCKED_HOUR` to change) which:
+That installs a launchd job (Sundays at 4:00; `GEO_UNBLOCKED_WEEKDAY` and
+`GEO_UNBLOCKED_HOUR` change it) which:
 
 1. snapshots the whole library — history and persistent IDs — into
    `data/catalog.tsv` (`--catalog`);
-2. notices tracks that died since yesterday and restores them (the usual run);
-3. keeps a **fingerprint** of up to 1,500 more live tracks a night
+2. notices tracks that died since last week and restores them (the usual run);
+3. keeps a **fingerprint** of every live track that has none yet
    (`--fingerprint N`): the preview, compacted to ~60KB. A whole 6,200-track
-   library is ~370MB and done in four or five nights. When one of those tracks
+   library is ~370MB; the first run does all of it in about seven hours of
+   quiet background requests, later runs only the tracks added since. When one of those tracks
    dies, candidates found online are checked against it automatically — no one
    has to judge them.
 
-Full copies are possible too (`--mirror N`, or `GEO_UNBLOCKED_MIRROR_PER_NIGHT`
-for the nightly job): each is verified against the preview and kept in
+Full copies are possible too (`--mirror N`, or `GEO_UNBLOCKED_MIRROR_PER_RUN`
+for the weekly job): each is verified against the preview and kept in
 `~/MusicArchive` (`GEO_UNBLOCKED_ARCHIVE`), and a dead track is then restored
 from disk in seconds. It is off by default — for 6,200 tracks it is ~45GB and
 about two days of downloading.
 
-On the first run macOS asks whether the job may control Music; allow it once.
+Music is opened hidden in the background if it is not running, and closed
+again afterwards. On the first run macOS asks whether the job may control
+Music; allow it once.
 Logs are in `work/logs/`.
 
 ## Before a full run, back the library up

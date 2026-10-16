@@ -823,9 +823,13 @@ Opus. Measured on three verified pairs (full preview → compacted):
 
 16kbps keeps every score well above `WAVE_SAME` (0.85); 8kbps came within 0.03
 of it on one track. ~4s per track including a 1.5s pause for Apple, so the
-nightly job does 1,500 and the library is covered in four or five nights.
+weekly job (Sundays 4:00) takes every track still missing one, so the first
+run covers the library in ~7h and later runs only the newly added. Daily was
+tried first and dropped at the user's call: after the first pass a daily run
+has almost nothing to do, and the only risk weekly adds is a track added and
+killed within the same week.
 
-**The nightly job runs under launchd and can drive Music** — verified by a
+**The scheduled job runs under launchd and can drive Music** — verified by a
 kickstart on 2026-10-16: snapshot, catalog (85s), refresh-index and the restore
 walk all completed. The first run triggers macOS's Automation prompt.
 
