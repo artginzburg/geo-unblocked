@@ -854,6 +854,21 @@ def effective_duration(path):
     return dur - lead - tail
 
 
+def container_duration(path):
+    try:
+        return float(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=60).stdout.strip())
+    except Exception:
+        return None
+
+
+class AudioMismatch(RuntimeError):
+    """The file arrived, and it is not the recording the reference says it
+    should be. Neither a network failure nor a refusal: the next candidate is
+    the answer, and nothing about the source is wrong."""
+
+
 # ---------------------------------------------------------------------------
 # Reference recordings
 #
@@ -1172,7 +1187,8 @@ def _wayback_spotify_preview(sid):
     """A restricted track has no preview on Spotify today, but an archived copy
     of its page still names `p.scdn.co/mp3-preview/…`, and that URL still
     answers: a 2020 capture gave 30s of `Yartie :: Marked Bills`."""
-    for ts, orig in _cdx(f"open.spotify.com/track/{sid}", limit=10)[:3]:
+    caps = _cdx(f"open.spotify.com/track/{sid}", limit=10) or _cdx(f"open.spotify.com/embed/track/{sid}", limit=10)
+    for ts, orig in caps[:3]:
         _, body = _http(f"https://web.archive.org/web/{ts}id_/{orig}", timeout=60, tries=2)
         m = re.search(r"https://p\.scdn\.co/mp3-preview/[0-9a-f]{20,}", body.decode("utf-8", "replace"))
         if m:
@@ -1225,24 +1241,6 @@ REF_SOURCES = (("itunes", _ref_itunes), ("deezer", _ref_deezer), ("genius", _ref
                ("wayback", _ref_wayback_apple), ("spotify", _ref_spotify))
 
 
-def apple_window(dur):
-    """Where in the release Apple's 30s preview starts, from the release length.
-
-    Measured on `Creepypasta Land`, 2026-10-16: tracks of 79s and more preview
-    from 45.0s, the 72s track from 30.0s, the 25s track from 0 -- in full. That
-    is "the first of 45 and 30 that leaves room for 30 seconds", and nothing in
-    between was measured, so a length under 60s other than a full preview gets
-    no window rather than a guess."""
-    if not dur:
-        return None
-    if dur <= 30.5:
-        return 0.0
-    for s in (45.0, 30.0):
-        if s + 30 <= dur:
-            return s
-    return None
-
-
 def _load_refs():
     try:
         return json.loads(REFS_INDEX.read_text())
@@ -1254,8 +1252,7 @@ def reference(row, want, quiet=False):
     """A short recording of the exact release, cached in work/refs/.
 
     Returns the cached record -- path, where it came from, the release's exact
-    length when the source states one, and for an Apple preview where in the
-    release it sits -- or None. Only a found reference is cached: a source that
+    length when the source states one -- or None. Only a found reference is cached: a source that
     failed this run is not evidence that none exists, so a miss is asked again
     next time. Each failure is printed, never folded into "not found"."""
     key = f"{row['Artist']} :: {row['Name']}"
@@ -1287,8 +1284,7 @@ def reference(row, want, quiet=False):
                 continue
             exact = h.get("dur") if h.get("exact", True) else None
             rec = {"path": str(dst), "source": h["source"], "via": h["via"], "url": h["url"],
-                   "page": h.get("page"), "dur": exact, "secs": round(got, 2),
-                   "window": apple_window(exact) if h["source"] == "apple" else None}
+                   "page": h.get("page"), "dur": exact, "secs": round(got, 2)}
             idx = _load_refs()
             idx[key] = rec
             REFS_INDEX.write_text(json.dumps(idx, ensure_ascii=False, indent=1))
@@ -1318,7 +1314,7 @@ def reference(row, want, quiet=False):
 from itertools import accumulate as _acc
 from operator import mul as _mul
 
-WAVE_SAME = 0.60      # median segment correlation of one lineage; see CLAUDE.md
+WAVE_SAME = 0.85      # median segment correlation of one lineage; see CLAUDE.md
 WAVE_MARGIN = 0.40    # ... and this far above the background, so a loop cannot pass
 
 
@@ -1985,49 +1981,22 @@ def spotify_via_search(row):
                 return thumb.replace("ab67616d00001e02", "ab67616d0000b273")
         return None
 
-    pat = r"open\.spotify\.com/(?:intl-[a-z]+/)?track/[A-Za-z0-9]{22}"
+    # Brave first, DuckDuckGo images second -- both memoised and shared with
+    # the reference search, which asks the same two questions of the same
+    # rate-limited engine.
     for q in queries:
-        r = subprocess.run(
-            ["curl", "-sL", "-A", UA_BROWSER, "--max-time", "25", "-w", "\n%{http_code}",
-             "https://search.brave.com/search?q=" + urllib.parse.quote(q)],
-            capture_output=True, text=True, timeout=60)
-        body, _, code = r.stdout.rpartition("\n")
-        # Brave rate-limits after a handful of queries and answers 429 with a
-        # CAPTCHA page. That page contains no links, so an unchecked status turns
-        # "we were blocked" into "there is no cover" -- say so instead.
-        if code.strip() == "429" or "captcha" in body[:4000].lower():
+        try:
+            links = brave_spotify_links(q)
+        except Refused:
+            # A CAPTCHA page has no links, so an unchecked 429 turns "we were
+            # blocked" into "there is no cover" -- say so instead.
             print("      Brave ограничил запросы (429) — ссылку найти нечем", flush=True)
             break
-        got = check(["https://" + x for x in
-                     sorted(set(re.findall(pat, urllib.parse.unquote(body))))])
+        got = check([x for x in links if "/track/" in x])
         if got:
             return got
-
-    # Second pass: image results carry their source page, which is often a
-    # Spotify track even when the web results do not surface it.
     for q in queries:
-        r = subprocess.run(
-            ["curl", "-s", "-A", UA_BROWSER, "--max-time", "20",
-             "https://duckduckgo.com/?q=" + urllib.parse.quote(q) + "&iax=images&ia=images"],
-            capture_output=True, text=True, timeout=40)
-        mm = re.search(r'vqd="?([\d-]+)"?', r.stdout)
-        if not mm:
-            continue
-        r2 = subprocess.run(
-            ["curl", "-s", "-A", UA_BROWSER, "-H", "Referer: https://duckduckgo.com/",
-             "--max-time", "20",
-             f"https://duckduckgo.com/i.js?l=us-en&o=json&q={urllib.parse.quote(q)}"
-             f"&vqd={mm.group(1)}&f=,,,&p=1"],
-            capture_output=True, text=True, timeout=40)
-        try:
-            results = jload(r2.stdout).get("results", [])
-        except Exception:
-            continue
-        links = []
-        for x in results:
-            links += ["https://" + y for y in re.findall(
-                pat, (x.get("url") or "") + " " + (x.get("source") or ""))]
-        got = check(links)
+        got = check([x for x in ddg_spotify_links(q) if "/track/" in x])
         if got:
             return got
     return None
@@ -3114,6 +3083,14 @@ def review(rows, approve=None):
         print(f"    хотим {want}s | кандидат {dur or '?'}s ({delta}) | score {v.get('score', 0):.0f} | {v.get('src', '?')}")
         print(f"    «{v.get('cand')}» — {v.get('uploader')}")
         print(f"    {v.get('url')}")
+        # The measurement, when there is one: a candidate the audio already
+        # rejected is not a judgement call, and approving it overrules evidence.
+        au = v.get("audio")
+        if au:
+            print(f"    звук: волна {au.get('wave')} при фоне {au.get('bg')} — "
+                  + ("та же запись" if au.get("same") else "ДРУГАЯ запись, одобрять незачем"))
+        elif v.get("why"):
+            print(f"    {v['why']}")
     print("\nодобрить:  python3 geo-unblock.py --review --approve 3,11,12")
 
 
@@ -3200,6 +3177,12 @@ def main():
     ap.add_argument("--no-soundcloud", action="store_true",
                     help="YouTube only; skip the SoundCloud fallback")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--audition", action="store_true",
+                    help="download and judge candidates against the reference, "
+                         "import nothing and write nothing -- not even state")
+    ap.add_argument("--track", action="append", default=None, metavar="'ARTIST :: NAME'",
+                    help="process only this row (repeatable); with --audition, "
+                         "also rows already done")
     ap.add_argument("--min-score", type=float, default=120,
                     help="below this a match is parked for review, not imported")
     ap.add_argument("--retry", metavar="STATUS", default=None,
@@ -3239,8 +3222,12 @@ def main():
     # and not touch -- silently rebuilt a playlist the user had just deleted on
     # purpose. A read-only command must leave the library exactly as it found it.
     if not (a.report or a.review or a.approve or a.dedupe or a.retire_originals
-            or a.snapshot or a.dry_run):
+            or a.snapshot or a.dry_run or a.audition):
         ensure_playlists()
+    # `--audition` must leave both the library and the record as they were: it
+    # exists to be run on a track that is already done, to see what the tool
+    # would do now.
+    save = (lambda _st: None) if a.audition else save_state
     st = load_state()
     # Reads the library, not the index -- it is about Music's own bookkeeping,
     # so it must run before anything insists a track list exists.
@@ -3277,7 +3264,13 @@ def main():
         repair(rows, st)
         return
 
-    if a.retry:
+    if a.track:
+        want_keys = set(a.track)
+        batch = [r for r in rows if f"{r['Artist']} :: {r['Name']}" in want_keys]
+        missing = want_keys - {f"{r['Artist']} :: {r['Name']}" for r in batch}
+        if missing:
+            print(f"нет в индексе: {sorted(missing)}")
+    elif a.retry:
         # A full walk re-runs every already_live probe and re-searches every
         # parked candidate -- minutes of work to reach a handful of rows. Select
         # them directly instead.
@@ -3293,9 +3286,9 @@ def main():
     else:
         batch = rows[a.start:a.start + a.limit]
 
-    for i, row in enumerate(batch, start=(0 if a.retry else a.start)):
+    for i, row in enumerate(batch, start=(0 if a.retry or a.track else a.start)):
         key = f"{row['Artist']} :: {row['Name']}"
-        if st.get(key, {}).get("status") == "ok":
+        if st.get(key, {}).get("status") == "ok" and not (a.audition and a.track):
             print(f"[{i}] skip (done): {key}"); continue
         # Duration is the load-bearing check for everything downstream, so a row
         # without one cannot be processed -- and must not take the whole run with
@@ -3305,13 +3298,13 @@ def main():
         if not raw_time.isdigit():
             st[key] = {"status": "no_duration", "note": f"Time={row.get('Time')!r}"}
             print(f"[{i}] {key}\n      НЕТ ДЛИТЕЛЬНОСТИ в индексе — пропускаю")
-            save_state(st)
+            save(st)
             continue
         want = int(raw_time)
         t0 = time.monotonic()
         print(f"[{i}] {key}  ({want}s)", flush=True)
 
-        if not a.dry_run and already_live(row["Name"], row["Artist"]):
+        if not (a.dry_run or a.audition) and already_live(row["Name"], row["Artist"]):
             # Nothing to import, but there is still something to save. The dead
             # entry holds the plays and the favourite; the copy the user swapped
             # in by hand may hold neither, and the moment the dead one is
@@ -3329,13 +3322,22 @@ def main():
                 st[key]["history_error"] = str(ex)[:200]
                 note = f"  ⚠ история НЕ перенесена: {str(ex)[:120]}"
             print("      УЖЕ ЕСТЬ живая копия — пропускаю" + note)
-            save_state(st); continue
+            save(st); continue
 
         # A named release beats any search: it is the actual record, not a guess
         # about which upload corresponds to it.
         vouched = pick_from_track_source(row) or pick_from_album(row, want, a.min_score)
         cands = [vouched] if vouched else pick(
             row["Name"], row["Artist"], want, providers, row.get("Album", ""), a.min_score)
+
+        # Fetched at most once per row, and only when a downloaded candidate
+        # needs judging -- the sources behind it cost up to a minute together.
+        _ref = {}
+
+        def ref(row=row, want=want, _ref=_ref):
+            if "r" not in _ref:
+                _ref["r"] = reference(row, want)
+            return _ref["r"]
         if not cands:
             st[key] = {"status": "not_found", "want": want, "secs": round(time.monotonic()-t0,1)}
             where, link = released_where(row, want)
@@ -3353,7 +3355,7 @@ def main():
                     f"      добавить нечего, ждём, пока где-нибудь всплывёт копия"))
             else:
                 print("      NOT FOUND")
-            save_state(st); continue
+            save(st); continue
 
         # Try candidates in order. A source can rank first and still fail to
         # deliver -- Mail.Ru's http file URLs 404'd for the whole project, which
@@ -3380,6 +3382,7 @@ def main():
                 # padded silence. That is cheap to settle with evidence: fetch it and
                 # measure the sound itself. Anything still off is a different cut.
                 prefetched = None
+                wrong_cut = False
                 off = abs((e.get("duration") or 0) - want)
                 # Run this for every wide candidate headed for review, not only ones that
                 # nearly cleared the bar: the whole point is that the score cannot decide
@@ -3400,16 +3403,34 @@ def main():
                         else:
                             shown = f"{eff:.0f}s (Δ{eff - want:+.0f}s)" if eff else "не измерился"
                             print(f"      чистого звука {shown} — другой монтаж")
+                            cand.unlink(missing_ok=True)
+                            wrong_cut = True
                             # Text must never outvote the audio: a candidate the
                             # measurement rejected cannot stay above the import bar.
                             sc = min(sc, a.min_score - 1)
-                            cand.unlink(missing_ok=True)
                     except Exception as ex:
                         print(f"      проверка тишины не удалась: {str(ex)[:60]}")
 
                 # Below this, the match is a guess -- a live cut, a re-upload, a lookalike.
-                # Park it for human review instead of quietly polluting the library.
-                if sc < a.min_score:
+                # Park it for human review instead of quietly polluting the library --
+                # UNLESS there is a reference to ask. A pseudonym release (`Spirit`
+                # for `The Imperas`) and a translated title (`Capitán Jack
+                # Sparrow`) fail the text checks by construction and are exactly
+                # right; the audio can say so where no title can, so they are
+                # downloaded and judged by it instead of handed to a person.
+                low = sc < a.min_score
+                if low and wrong_cut and ref():
+                    # Already downloaded and measured, and the length is wrong.
+                    # The audio cannot rescue that, so do not fetch it twice.
+                    st[key] = {"status": "review", "url": url, "score": sc, "cand": e.get("title"),
+                               "uploader": e.get("uploader"), "want": want,
+                               "cand_dur": e.get("duration"), "src": prov,
+                               "why": "другой монтаж: длина не та",
+                               "secs": round(time.monotonic()-t0,1)}
+                    continue
+                if low and not a.dry_run and prov != "manual" and ref():
+                    print(f"      ниже порога ({sc:.0f}) — решит звук, сверяю с эталоном")
+                elif low:
                     st[key] = {"status": "review", "url": url, "score": sc, "cand": e.get("title"),
                                "uploader": e.get("uploader"), "want": want,
                                "cand_dur": e.get("duration"), "src": prov,
@@ -3430,11 +3451,11 @@ def main():
                               f"      возможно это оно, артист записан иначе — проверь:\n"
                               f"      {link}" if where == "maybe" else
                               f"      издан ({link}), но в Apple Music его нет")
-                    save_state(st); break
+                    save(st); break
                 if a.dry_run:
                     st[key] = {"status": "dry", "url": url, "score": sc,
                                "cand": e.get("title"), "uploader": e.get("uploader")}
-                    save_state(st); continue
+                    save(st); continue
 
                 try:
                     f = prefetched or fetch(url, str(DEST / safe(f"{row['Artist']} - {row['Name']}")))
@@ -3452,6 +3473,33 @@ def main():
                     if got is None:
                         f.unlink(missing_ok=True)
                         raise RuntimeError("длительность скачанного файла не измерилась")
+                    # Ask the reference, when there is one. Before the length
+                    # check, because the answer changes what the length means.
+                    R = ref()
+                    verdict = compare_audio(R["path"], f) if R else None
+                    if verdict:
+                        print(f"      звук против эталона ({R['via']}): волна {verdict['wave']:.2f} "
+                              f"при фоне {verdict['bg']:.2f}, огибающая {verdict['env']:.2f}, "
+                              f"эталон с {verdict['lag']:.1f}s — "
+                              + ("та же запись" if verdict["same"] else "ДРУГАЯ запись"), flush=True)
+                    # Before the length check: "a different recording" says more
+                    # than "the wrong length", and it is what review should show.
+                    if verdict and not verdict["same"]:
+                        if prov == "manual":
+                            print("      ⚠ звук расходится с эталоном — беру, потому что "
+                                  "источник указан вручную", flush=True)
+                        else:
+                            f.unlink(missing_ok=True)
+                            raise AudioMismatch(f"звук не совпал с эталоном: волна {verdict['wave']:.2f}")
+                    if verdict and verdict["same"] and got < want - DUR_TOLERANCE:
+                        # Silence is part of the release. `Капитан Джек Воробей`
+                        # matched its reference at 1.00 and was still rejected:
+                        # 242s of file, 238s once the master's own quiet edges
+                        # were stripped. With the audio proven the same, only the
+                        # container can be short of the release; a padded-out
+                        # fragment like the 4.4s Mail.ru file never gets here,
+                        # because it cannot match a 30s reference.
+                        got = container_duration(f) or got
                     if abs(got - want) > DUR_TOLERANCE:
                         # A human named this release; say so and take it anyway.
                         if prov == "manual":
@@ -3461,9 +3509,19 @@ def main():
                             f.unlink(missing_ok=True)
                             raise RuntimeError(
                                 f"скачано {got:.0f}s вместо {want}s — не та запись")
+                    if low and not (verdict and verdict["same"]):
+                        f.unlink(missing_ok=True)
+                        raise AudioMismatch("эталон есть, но сравнить не удалось — без него ниже порога")
+                    src_url = url
+                    if a.audition:
+                        f.unlink(missing_ok=True)
+                        print(f"      ПРОСЛУШКА: импортировал бы{' по звуку' if low else ''} "
+                              f"— {src_url} ({got:.1f}s)")
+                        handled = True
+                        break
                     art_src = tag(f, row,
                                   e.get("thumbnails", [{}])[-1].get("url") if e.get("thumbnails") else None,
-                                  src_url=url, uploader=e.get("uploader") or "",
+                                  src_url=src_url, uploader=e.get("uploader") or "",
                                   trusted_thumb=bool(e.get("trusted_art")),
                                   hint=e.get("title") or "")
                     # Park BEFORE importing: once our file is added Music may be mid-merge,
@@ -3484,10 +3542,21 @@ def main():
                                "plays": plays, "uploader": e.get("uploader"),
                                "cand": e.get("title"),
                                "secs": round(time.monotonic()-t0,1)}
+                    if verdict:
+                        st[key]["audio"] = {**verdict, "ref": R["via"], "ref_page": R.get("page")}
                     print(f"      ADDED  art={art_src} parked={parked} plays={plays} "
                           f"({time.monotonic()-t0:.0f}s)")
                     handled = True
                     break
+                except AudioMismatch as ex:
+                    # Parked with the measurement, not filed as an error: the
+                    # source delivered, and what it delivered is a different
+                    # recording. The next candidate may well be the right one.
+                    st[key] = {"status": "review", "url": url, "score": sc, "cand": e.get("title"),
+                               "uploader": e.get("uploader"), "want": want,
+                               "cand_dur": e.get("duration"), "src": prov, "why": str(ex),
+                               "audio": verdict, "secs": round(time.monotonic()-t0,1)}
+                    print(f"      ОТВЕРГНУТ  {ex}")
                 except Exception as ex:
                     # Record whether a delete already happened. Adjacent is not atomic:
                     # if the import failed after purge_ours removed the previous copy,
@@ -3518,7 +3587,7 @@ def main():
                 break
             print(f"      ни один кандидат не скачался — добираю остальные "
                   f"источники ({len(cands)} новых)")
-        save_state(st)
+        save(st)
 
     ok = sum(1 for v in st.values() if v.get("status") == "ok")
     print(f"\n-- done: {ok} ok / {len(st)} seen --")

@@ -586,9 +586,9 @@ the same track id twice (no duplicate). It happened right after a `music://` URL
 had been opened in Music; the likeliest reading is that Music was busy, not that
 the path was wrong.
 
-The obvious next use: tracks parked with a plausible candidate and nothing to
-check it against — `Hobart Ocean :: Confidential Liar (Live)` has a 2010 live
-video and no reference at all.
+`Hobart Ocean :: Confidential Liar (Live)` still has no reference: its Spotify
+EP lists the track as `COUNTRY_RESTRICTED` with no preview, and the Wayback
+Machine holds no capture of the track page, its embed, or the album.
 
 ### More places a dead track's preview survives — measured 2026-10-16
 
@@ -661,6 +661,87 @@ then fetches the whole track; some segments are AES-128 (`key.pub` beside them,
 256k in MPEG-TS. All three tracks matched their references: Guns 0.990 against
 the AthFest preview, Sigma 0.986 against Deezer's (the cover: 0.646), I GET DOWN
 0.980 against Apple's.
+
+## The reference is the tool's job, and the audio decides
+
+Everything above was run by hand on 2026-10-16. `reference()` and
+`compare_audio()` make it the tool's: for each row it is about to import, the
+tool finds a short recording of the release, caches it in `work/refs/`
+(`index.json` says where each came from), and judges every downloaded candidate
+against it before anything touches the library.
+
+**Sources, cheapest first, stopping at the first that fits** -- artist, title
+and length checked against the row, as strictly as `released_where`, because a
+wrong reference rejects the right file and blesses a lookalike: Apple's Search
+API (own store merged with `us`), Deezer, Genius's `apple_music_player`, the
+Wayback Machine's Apple album and song pages (CDX by exact prefix, `us` and the
+account's store), and Spotify (the public embed page, which carries name,
+artists, length and `audioPreview` with no account, and an archived copy of the
+track page when the track is restricted). Found on the first run, 2026-10-16:
+Sigma from Deezer, I GET DOWN from Genius, Summertime and Guns from Apple's API,
+Creelles Town from Wayback. Twin Peaks, Marked Bills and Confidential Liar need
+Spotify, and Brave was answering 429 all session.
+
+Only a found reference is cached. A miss is asked again next run, because a
+source that failed is not evidence that no reference exists.
+
+**`jload` turned a found capture into none.** The CDX index answers with a JSON
+*list*, and `jload` returns `{}` for anything that is not an object -- by
+design, for yt-dlp's `null`. So the first version of `_cdx` read every capture
+as "never archived", and Creelles Town's reference, sitting in the archive,
+came back as no reference at all. Nothing errored. `_cdx` parses with
+`json.loads` and lets a malformed answer raise.
+
+**The verdict is the waveform; the envelope only says where to look.** The
+200ms RMS envelope finds the offset (it was right to the 0.1s on every case
+below), a 1kHz waveform pass pins it to the millisecond, and 8kHz waveform
+correlation through a 3kHz low-pass, in 5s segments with +-5ms slack, decides.
+Every segment is also scored at two wrong offsets (+0.37s, -0.53s) -- the
+background, which is the "against a known-wrong track" calibration done for free.
+Measured with the code as committed:
+
+| candidate against reference | envelope | waveform | background |
+|---|---|---|---|
+| Summertime: three uploads of the master | 0.77-1.00 | 0.97-1.00 | 0.03 |
+| Summertime: the old import, shifted -12 cents | **0.80** | **0.04** | 0.03 |
+| Summertime: Beck's own mix | 0.74 | 0.25 | 0.03 |
+| Sigma: `САТАНА ПЕЧЕТ БЛИНЫ-SIGMA(COVER)` | 0.73 | **0.69** | 0.05 |
+| Guns: the review candidate (another song), the live take | 0.68-0.72 | 0.01-0.02 | 0.02 |
+| Sigma: five other songs by the band, one 199s long | 0.28-0.64 | 0.01-0.05 | 0.01-0.03 |
+
+Two things in that table set the rules. The shifted copy's envelope beat two
+genuine uploads, so **the envelope can never be the verdict**. And the Sigma
+"cover" is not a re-performance: it reads 0.65-0.84 per segment, because the
+uploader sang over the **original backing track** -- part of the file is the
+master. A bar at 0.6, the first guess, let it through. `WAVE_SAME` is **0.85**:
+above every contaminated copy measured, below every genuine one (0.97+) and the
+AthFest Guns pair (0.91).
+
+**What the verdict changes in the loop.** A candidate that matches is imported
+even when its score is below the bar -- that is what reaches pseudonyms
+(`Spirit` for `The Imperas`) and translated titles, which fail
+`NO_TITLE_CAP`/`NO_ARTIST_CAP` by construction. A candidate that does not match
+is rejected whatever it scored, and the next is tried; the row parks in review
+with the measurement in `state.json` only when none passes. Without a reference
+the old rules stand. A `manual` source is compared and warned about, never
+rejected -- a human verdict outranks the heuristic, as everywhere else.
+
+Cost: the comparison is 2-6s of pure Python per candidate (no numpy on the
+system Python, and none needed). The reference is the expensive part when there
+is none to find -- up to five Wayback probes and two Brave queries, about 20s --
+and it is fetched only once a candidate is actually downloaded.
+
+**`--audition`** runs the real loop -- search, download, reference, verdict --
+and stops where the import would start. It writes neither the library
+nor `state.json`, and with `--track` it runs on rows already done. It is how
+every number in this section was produced through the changed path rather than
+beside it.
+
+**A known gap, not fixed here:** YouTube search returns *nothing* for a query
+containing `Bob-Omb` -- `-Omb` reads as an exclusion. `sex bob-omb summertime`
+gives zero results, `Summertime Scott Pilgrim` gives eight. `pick()` puts the
+artist in most queries, so every hyphenated artist is searched on YouTube by the
+bare title alone.
 
 ## Verified discovery beats a trusted caption
 
@@ -803,9 +884,8 @@ destroying phase alignment, which is what the waveform sees. So:
   21.3kHz and `encoded_by=iTunes 9.2.1` in its tags. Bitrate ranks the encode,
   not the recording.
 
-Still not in the code. The open questions are unchanged -- when to spend the
-downloads, what to do when the vote splits -- but the method to run when it is
-worth spending them is now settled, and it is two stages, not one.
+It is in the code now, against a reference rather than candidate against
+candidate -- see "The reference is the tool's job" below.
 
 **Measure the file that arrived. Always, not conditionally.** Every duration
 decision before the download is made on metadata the *source* supplied. The
@@ -933,6 +1013,21 @@ wrong songs in the library. Measured both ways before choosing:
 **And run that sweep again after any scoring change.** It took one query over
 `state.json` to find three years' worth of wrong songs; nothing else in this
 project had ever compared the two titles after the fact.
+
+**With a reference, the cap no longer has the last word.** A candidate it parks
+is now downloaded and compared (see "The reference is the tool's job"), and
+`Capitán Jack Sparrow` reads **1.00** against Deezer's preview of `Капитан Джек
+Воробей`, while the two other YouTube Music results the same search ranked next
+-- different pirate songs at 240s and 244s -- read 0.01 and 0.03. The human
+verdict is still the route when no reference exists, and still outranks one.
+
+That same run found **a defect in the delivered-file check**. The exact master
+was rejected as `скачано 238s вместо 242s`: the release has four seconds of
+silence of its own, and `effective_duration` strips silence by design, so a
+perfect copy measured short. The check exists for the 4.4s Mail.ru fragment
+padded out to 121s, which no reference could ever match -- so when the audio is
+proven the same and only the silence-stripped length is short, the container
+length is what gets compared. Without a reference the strict check stands.
 
 **Verify the artist, every time.** Three near-misses came from matching a title
 and a duration and nothing else: a different artist's "Лодка" with a convincing

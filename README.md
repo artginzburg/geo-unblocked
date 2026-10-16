@@ -91,19 +91,25 @@ worse: it has no `Favorited` column, and the favourite flag has no other backup.
    which — one track ran 206s in the file but 198s of actual sound against an
    expected 195s, and was accepted on that evidence.
 5. **Downloads** native AAC where available, so nothing is transcoded.
-6. **Finds artwork** through nine sources, each verified before use.
-7. **Imports,** carries the listening history across, and files leftovers into
+6. **Checks the audio against the release itself**, when a short recording of
+   the release can be found — see below. A file that is not the same recording
+   is rejected, whatever its title says; one that is gets imported even when its
+   title or artist would not have passed.
+7. **Finds artwork** through nine sources, each verified before use.
+8. **Imports,** carries the listening history across, and files leftovers into
    playlists.
 
-Anything the rules cannot settle is parked for review rather than guessed at.
+Anything neither the rules nor the audio can settle is parked for review rather
+than guessed at.
 
-**A candidate has to match the title, not just the artist and the length.** A
-song by the right artist, of the right length, under a completely different name
-is parked, never imported — three such imports had slipped through before this
-rule existed (`Gin Wigmore :: Oh My` had been replaced by her own `Hey Ho`). The
-side effect: a release published under a **translated** title — `Капитан Джек
-Воробей` as `Capitán Jack Sparrow` — is parked too, and needs one line in
-`track_sources.json`.
+**A candidate has to match the title, not just the artist and the length** —
+unless the audio proves it. A song by the right artist, of the right length,
+under a completely different name is never imported on text alone: three such
+imports had slipped through before this rule existed (`Gin Wigmore :: Oh My` had
+been replaced by her own `Hey Ho`). A release published under a **translated**
+title (`Капитан Джек Воробей` as `Capitán Jack Sparrow`) or a pseudonym fails the
+same rule and is right; when a reference recording exists, the comparison below
+decides it, and only without one does it wait for a person.
 
 ## Overriding the automation
 
@@ -143,49 +149,70 @@ page that looks like an empty result. Over a couple of hundred tracks it will be
 blocked long before the end, so the hand-named map is still the reliable route
 for the tail.
 
-## When the tool finds nothing: hunting a track by hand
+## How the tool tells the right file from a lookalike
 
-"Not found" from the tool means "not found by its searches", not "gone". In one pass
-over 25 dead tracks, five were first written off as withdrawn from every platform;
-three of those then turned up once the sources that had *refused* were asked again.
-What actually worked, in the order worth trying:
+Titles, artists and lengths are typed by whoever uploaded, and every one of them
+has let a wrong file in at some point: covers, radio rips, a re-mix by the same
+artist, a copy pitch-shifted by 12 cents. The only identifier that survives all
+of that is the audio. So for every track it is about to import, the tool first
+looks for **a short recording of the actual release** — a reference — and
+compares the downloaded file against it.
 
-1. **Get a reference recording first.** A 30-second preview is enough to tell the
-   right file from a lookalike, and it usually survives the track's removal:
-   - Apple's preview stays on its CDN after the track leaves the catalogue. Its URL
-     (`audio-ssl.itunes.apple.com/…plus.aac.p.m4a`) is in any Wayback Machine snapshot
-     of the album page — query the CDX index by the exact page prefix,
-     `music.apple.com/us/album/<slug>*`, not by domain.
-   - `https://genius.com/songs/<song id>/apple_music_player` embeds the same Apple
-     preview URL, even when Wayback never captured the album page.
-   - A Wayback snapshot of a Spotify track page holds its `p.scdn.co/mp3-preview/…`
-     URL, which also keeps working.
-   - Deezer's API returns a `preview` field for tracks that are still listed.
-2. **Compare audio, not titles.** Slide the preview along each candidate: same
-   recording peaks at 0.9+, a different take or a cover sits well below. Calibrate
-   first — preview against itself, and against a known-wrong track of the same
-   length. When candidates disagree only subtly, correlate the waveform in short
-   segments: that catches pitch-shifted and re-encoded copies a loudness comparison
-   misses.
-3. **Look where the same recording lives under another name.** Budget labels publish
-   one master under several invented artists; distributors re-release a single on a
-   compilation; a "removed" EP may be a re-delivery still on sale in other countries.
-   The reference identifies it regardless of credits.
-4. **Ask the sources that refused, again — and tell refusals from absences.** HTTP
-   403/418/429/451 and bot challenges are a "no" from the site, not from the
-   catalogue. Some of them need a real browser, a VPN to another country, or a
-   logged-in account.
-5. **User-upload catalogues hold what stores dropped.** Mail.ru (use `https://`),
-   mp3party (needs a `Range` header; a 29-byte `failed to get file info` means the
-   listing exists but the file is not stored), and VK, whose search only works when
-   logged in.
-6. **Check the artist's own site.** One withdrawn album was a free lossless download
-   on the musician's own page.
+**Where the reference comes from**, cheapest first. A 30-second store preview is
+enough, and Apple's outlives the track: it stays on Apple's CDN after the release
+leaves every storefront.
 
-The tool cannot buy, sign in or get past DRM. When a track exists only behind an
-account, a purchase or a subscription stream, it reports where, and the rest is a
-person's call. A verified source goes into `data/track_sources.json`, and the next
-run imports it with history like any other track.
+| source | what it gives | example it found |
+|---|---|---|
+| Apple's search API | the preview of a release still listed in your store or in `us` | `Sex Bob-Omb :: Summertime`, gone from `ge`, live in `us` |
+| Deezer | its 30s preview | `Сатана Печёт Блины :: Sigma` |
+| Genius | the Apple preview of the track it linked, plus the exact length | `MARU NARA :: I GET DOWN`, whose album was re-delivered without it |
+| Wayback Machine, Apple pages | every preview an archived album or song page listed | `405Okced :: Creelles Town`, captured 2024 |
+| Spotify | the public embed page's preview; for a restricted track, an archived copy of its page | — |
+
+A reference is accepted only when its own artist, title and length match the
+library entry, and is cached in `work/refs/`. A source that failed is reported as
+a failure, never as "no reference".
+
+**How the comparison works.** The tool slides the reference along the candidate
+to find where it sits, then correlates the two waveforms in five-second
+segments. Each segment is also scored at two deliberately wrong offsets, so
+every number comes with its own background. Measured on known answers:
+
+| candidate | waveform | verdict |
+|---|---|---|
+| three independent uploads of `Summertime` | 0.97–1.00 | same recording |
+| `Summertime` pitch-shifted by −12 cents | 0.04 | rejected, though its loudness contour matched at 0.80 |
+| Beck's own mix of `Summertime` | 0.25 | rejected |
+| a cover of `Sigma` sung over the original backing track | 0.69 | rejected |
+| wrong songs of the right length | 0.01–0.05 | rejected |
+| background (wrong offsets) | 0.02–0.06 | |
+
+The bar is 0.85. A candidate the text checks would have parked — another
+artist's name, a translated title — is downloaded and judged this way instead,
+and imported when it matches. Without a reference, the text rules stand.
+
+**`--audition`** runs all of this for one or more rows, including ones already
+done, and stops short of the library: it searches, downloads, compares and
+prints what it would import, writing nothing.
+
+```bash
+python3 geo-unblock.py --audition --track "Sex Bob-Omb :: Summertime"
+```
+
+### What it still cannot reach
+
+"Not found" means "not found by its sources", never "gone". Some of what remains
+sits behind something the tool does not do, and it says which:
+
+- **A source that refuses** — HTTP 403/429, a CAPTCHA, YouTube's sign-in wall —
+  is reported as a refusal and dropped for the rest of the run, not counted as
+  an absence.
+- **VK** holds tracks no store does, but its search needs a signed-in session,
+  and the tool does not sign in.
+- **A store purchase or a stream** it cannot use: it reports when the record is
+  in your storefront (one click in Music, and the tool carries the history
+  across), in another storefront, or on Deezer only.
 
 ## Artwork sources, in descending order of trust
 
@@ -310,6 +337,8 @@ python3 geo-unblock.py --repair                        # patch already-imported 
 | `--playlist NAME` | scan a playlist instead of the whole library |
 | `--retry STATUS` | process only rows recorded as `error`, `review` or `not_found` |
 | `--dry-run` | resolve matches, download and import nothing |
+| `--audition` | download and check candidates against the reference; import and record nothing |
+| `--track 'A :: T'` | process only this row (repeatable); with `--audition`, rows already done too |
 | `--min-score` | confidence below which a match goes to review (default 120) |
 | `--no-soundcloud` | YouTube only |
 | `--report` | counts, sources, timings, and anything left in review |
