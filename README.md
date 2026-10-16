@@ -28,13 +28,22 @@ second on a 6500-track library, and writes `data/list.tsv`. Rerun it whenever
 the library changes; tracks already replaced drop out on their own, since they
 are no longer unavailable.
 
-Store lookups (artwork, availability) go to the storefront named by
-`GEO_UNBLOCKED_STORE`, defaulting to `us`, plus `us` as a second look. It cannot
-be detected — macOS's region is not the Apple ID's storefront — so set it if
-yours differs:
+Store lookups (artwork, availability) go to your own storefront, plus `us` as a
+second look. **The storefront is detected**, from the signed-in account rather
+than from macOS's region — the two are not the same thing, and only the Apple
+ID's country moves the storefront, so travelling does not change it. You can see
+what was found with:
 
 ```bash
-GEO_UNBLOCKED_STORE=ge python3 geo-unblock.py --repair
+defaults read com.apple.itunesstored AccountsNotificationPlugin.ActiveStorefrontIdentifier
+```
+
+The leading number is the storefront id, and the iTunes API takes it directly,
+so no country code is involved. Override it with a two-letter code if you want a
+different catalogue:
+
+```bash
+GEO_UNBLOCKED_STORE=us python3 geo-unblock.py --repair
 ```
 
 `--playlist` is for scoping to a subset — a playlist you maintain by hand, or a
@@ -87,6 +96,14 @@ worse: it has no `Favorited` column, and the favourite flag has no other backup.
    playlists.
 
 Anything the rules cannot settle is parked for review rather than guessed at.
+
+**A candidate has to match the title, not just the artist and the length.** A
+song by the right artist, of the right length, under a completely different name
+is parked, never imported — three such imports had slipped through before this
+rule existed (`Gin Wigmore :: Oh My` had been replaced by her own `Hey Ho`). The
+side effect: a release published under a **translated** title — `Капитан Джек
+Воробей` as `Capitán Jack Sparrow` — is parked too, and needs one line in
+`track_sources.json`.
 
 ## Overriding the automation
 
@@ -176,6 +193,15 @@ was: 256 AAC audio file
 The leading marker identifies the tool's own imports, so a rerun can replace
 them without touching anything of yours.
 
+**Apple may rename the entry.** When iCloud Music Library *matches* an import
+against Apple's catalogue (`cloud status = matched`), the library row takes the
+store's title, artist and album while the file keeps ours. One import landed as
+`Paul Brooks — Theme from "Twin Peaks"` on `Ultimate TV Themes` instead of
+`The Imperas — Twin Peaks Theme`. Nothing is lost — the plays and the comment
+come across, and a matched track streams from Apple — but the entry is no longer
+findable by the name the index holds, so a later run would import it again.
+Writing the name, artist and album back onto the track fixes it and sticks.
+
 **The favourite flag is only as safe as the index.** Music's export has no such
 column, so a scan of the library is the only place it is captured. Refresh the
 index before doing anything destructive; once a dead entry is gone, a flag that
@@ -206,11 +232,20 @@ open -a Music
 That is the whole backup. The database holds play counts, playlists, favourites
 and add dates — the part no download restores — and it is about 96MB.
 
-**Do not copy the media folder.** On a subscription the catalogue re-downloads
-from Apple. In this library only 149 of 6519 tracks are `uploaded` or `matched`
-(the user's own uploads plus this tool's imports) — 0.41GB against 56.9GB of
-subscription content. Back up those few files if you like; copying everything is
-hours of I/O for nothing.
+**Do not copy the whole media folder.** On a subscription the catalogue
+re-downloads from Apple. Measured 2026-10-16: of 6548 tracks, 6193 are
+`subscription` and only 330 are `uploaded` or `matched` — the user's own uploads
+plus this tool's imports. Those live under `Media.localized/Music`, and
+subscription content under `Media.localized/Apple Music` (53GB), so copying just
+the first is the whole job:
+
+```bash
+ditto ~/Music/Music/Media.localized/Music ~/Backups/music-$(date +%F)/own-files
+```
+
+That came to 9.0GB in 11882 files here — far more files than there are library
+rows, because that folder also accumulates orphans Music left behind on earlier
+imports. Copying it is still cheap next to the 53GB that comes back on its own.
 
 Keep the backup outside `~/Music` so Music does not index it.
 
@@ -294,7 +329,10 @@ that pair is what the originals playlist is for.
 ## Requirements
 
 `yt-dlp`, `ffmpeg`, Python 3, and macOS Music with AppleScript automation
-allowed. Reading files inside `~/Music/Music` additionally needs Full Disk
+allowed. **Keep `yt-dlp` current.** YouTube refused every download with
+`LOGIN_REQUIRED` for a whole month on 2026.7.4 and downloads fine again on
+2026.08.19, with no cookies and no PO token — so a source that looks dead may
+only be an old binary. Reading files inside `~/Music/Music` additionally needs Full Disk
 Access, but the tool does not need it — it reads artwork out of Music itself.
 
 ### Spotify Web API (optional, and probably not worth it)

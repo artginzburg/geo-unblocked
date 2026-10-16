@@ -62,6 +62,35 @@ instead of what the library *holds*.
   match was not re-added afterwards. Inside the script it is safe, because
   delete and add are adjacent. As a standalone cleanup it is not.
 
+## A `matched` import is renamed by Apple, and the file is not
+
+`tag()` writes the library's own title, artist and album into the file before
+import, so the entry should keep its identity. It does not always. When iCloud
+Music Library **matches** the audio against Apple's catalogue, the library row
+takes the STORE's metadata and the file keeps ours. Measured 2026-10-16 on
+`The Imperas :: Twin Peaks Theme (From 'twin Peaks')`:
+
+| | artist | title | album |
+|---|---|---|---|
+| file on disk (`ffprobe`) | The Imperas | Twin Peaks Theme (From 'twin Peaks') | Back Massage |
+| library row | **Paul Brooks** | **Theme from "Twin Peaks"** | **Ultimate TV Themes** |
+
+`cloud status` was `matched`, and Music had even filed the file under
+`Media.localized/Music/Compilations/Ultimate TV Themes/`. The history came
+across correctly (15 plays, the comment), so nothing was lost -- but the entry
+is no longer findable by the name and artist the index holds, which is what
+`already_live`, `inherit_history`, `purge_ours` and `park_original` all key on.
+A later pass would treat the track as missing and import it again.
+
+Incidentally this is more evidence for the pseudonym story below: the same
+master is `The Imperas`, `Spirit`, `The One World Ensemble` AND `Paul Brooks`,
+and Apple's own matcher knows them to be one recording.
+
+**So verify the library row after an import, not just the file.** Writing
+`name`, `artist` and `album` back onto the matched track restores the identity
+and is accepted; per the rule below, check it again after a delay rather than by
+the readback in the same script.
+
 ## Two playlists can share a name, and every reference here is by name
 
 Music allows duplicate playlist names and `user playlist "X"` resolves to
@@ -92,6 +121,77 @@ localised. The README documents the four manual steps instead.
 
 If you open that dialog while exploring, close it (`key code 53`) before doing
 anything else. It is modal, and leaving it open freezes the user's Music.
+
+## Apple re-credits artists, and `already_live` goes blind when it does
+
+`already_live()` asks Music for a track whose `name is X and artist is Y`, both
+exact, and its whole job is to stop the tool putting a 128k download next to a
+working 256k stream. On 2026-10-16 it did the opposite for two tracks, because
+**Apple had re-credited them between passes**: the index rows say `АИГЕЛ`
+(Cyrillic, as the library once held them) and the live subscription copies are
+now credited `AIGEL` (Latin). Exact match fails, `already_live` returns false,
+and the tool imports a second copy of a song that plays perfectly — measured:
+`AIGEL · Потанцуем-помолчим · subscription · 241.6s` sits in the library beside
+`АИГЕЛ · Потанцуем-помолчим · uploaded · 238.6s`, our file, with our comment.
+
+The matcher already folds Cyrillic to Latin for exactly this reason; the
+*liveness probe* does not, so the two disagree about whether a track is the same
+song. Two defects in one line, in fact — it is also a `whose` filter, which this
+file has already measured as under-returning silently (214 against 215). The
+repair is to bulk-read `name`/`artist`/`cloud status` in one call and compare
+with the same token folding the scorer uses. **Not done yet; recorded here so it
+is not rediscovered.** `--dedupe` finds the damage after the fact, but a check
+that only works while Apple's spelling holds still is not a check.
+
+## A stale `cloud status` makes a working track look dead
+
+`build_index` selects on `cloud status is no longer available`, and that is the
+right rule — but Music does not always clear the field. `Sex Bob-Omb ::
+Summertime` reports `no longer available` while being a `file track` with a real
+location (`…/Media.localized/Music/Sex Bob-Omb/…/18 Summertime.m4a`, 130.011s at
+325kbps, our comment on it) — the import merged into the dead entry, attached
+the file, and the status never moved. So the track plays, and the index reports
+it dead on every rebuild.
+
+It cost a wrong diagnosis in the same session: read through a broken `POSIX path`
+expression (see the AppleScript traps), the location came back empty and the
+entry was written up as "the import never attached a file". Both halves were
+wrong. **Before concluding a track is dead, read its location with `get` and
+look at the file.**
+
+## `purge_ours` deletes inside a `whose` loop, and it reported a delete it did not make
+
+Called by hand on `$uicideBoy$ :: N****z` it returned `1` -- one track deleted,
+history folded into the index -- and the file track carrying our marker was
+**still there** afterwards, at the same persistent ID. Deleting it by persistent
+ID worked on the first try. The function does
+`repeat with t in (every file track … whose name is … and artist is …)` and
+calls `delete t` INSIDE that loop, which is both traps this file already lists:
+`whose` under-returns, and deleting while iterating invalidates the specifiers
+the loop is holding. In a destructive function.
+
+The library was checked for collateral damage, and there was none: 6550
+persistent IDs before and 6550 after, with 14 gone and 14 added, every one of
+them accounted for by this session's imports. So the failure here was a no-op
+and a false report, not a wrong delete -- but the shape of the bug allows a
+wrong delete, and the return value cannot be trusted either way.
+
+**Not fixed yet.** The repair is the one this file already prescribes for every
+other delete: collect `persistent ID`s first, then delete by ID, and report what
+the second read says rather than what the loop counted.
+
+### And a merged entry has no original left behind it
+
+`purge_ours` on `Gin Wigmore :: Oh My` deleted the single row the library held
+and the track was then **gone from the library entirely** -- no dead original
+underneath, because the earlier import had merged into the user's entry and
+become it. `park_original` only *duplicates* the dead entry into a review
+playlist, so for the Decemberists and the rest the original survived the purge;
+here there was nothing to survive. The index kept the history (1 play), and the
+recovery was to add the track back from the store.
+
+So: **before purging an import, count the rows.** One row means purging removes
+the track, not the replacement.
 
 ## A read-only command must leave the library as it found it
 
@@ -152,9 +252,21 @@ are `.movpkg`, comment empty, `subscription`.
   equivalent — grouping on name+artist+album — needs duration and track number
   to separate real duplicates from different songs that share a title, and see
   the index warning below before joining that data across calls.
-- **Merging is a sum, not a max.** The usual raise-only rule exists because
-  `--repair` reruns; here each row counted different real listens, so the
-  keeper gets the total. Keep the oldest row: it holds the true `date added`.
+- **Merging is a sum, not a max** — *for Music's own re-downloads.* The usual
+  raise-only rule exists because `--repair` reruns; there each row counted
+  different real listens, so the keeper gets the total. Keep the oldest row: it
+  holds the true `date added`.
+- **But the sum is WRONG when the duplicate is one of our imports**, and
+  `--dedupe` does not tell the two cases apart. Our import gets its play count
+  written onto it by `apply_export_history` from the index — the *same* listens
+  the original already counted, not new ones. Measured 2026-10-16: `AIGEL ::
+  Пыяла` had the live subscription row at 2 plays and our duplicate import at 2
+  plays, and `--dedupe` proposed "итог: 4 просл." A genuine re-download pair has
+  two independent histories; a row carrying our `geo-unblocked ·` comment has a
+  copy of the other one's. The discriminator is already in the comment, and
+  `dedupe` does not look at it. **Not fixed; the two rows were deleted by hand.**
+  Also worth knowing: `--dedupe` groups on duration, so it missed the second
+  pair entirely — `Потанцуем-помолчим` was 241.6s live against 238.6s imported.
 - **Check playlist membership before deleting.** Smart playlists re-evaluate and
   need nothing, but a plain playlist loses the song when its only member row is
   deleted — re-add the keeper first. Two of the three rows above were in a
@@ -243,6 +355,26 @@ are `.movpkg`, comment empty, `subscription`.
   Universal Theme, Garbage Truck, Sex Bob-Omb's Threshold) — four false
   positives and four tracks with no backup row, from one call. **A snapshot and
   a live read are two calls no matter how they are spelled.**
+- **`location` is the one field that cannot be bulk-read.** `get location of
+  every track of library playlist 1` raises -1728 ("Can't get location of every
+  track of…") while the sixteen fields `build_index` reads come back fine. So the
+  "bulk-read every field you will emit" rule has exactly one exception, and
+  anything needing file paths must walk live — reading *every* property it
+  compares off the same live specifier, never joining a live location to a bulk
+  status snapshot.
+- **`POSIX path of (location of t)` silently returns nothing; `POSIX path of
+  (get location of t)` works.** Without the `get`, AppleScript sends Music the
+  whole chain and then tries to coerce a *reference* — the error reads `Can't
+  make «class pLoc» of «class cFlT» id 34045 … into type Unicode text`, which
+  looks like "this track has no file" and is nothing of the kind. Measured on one
+  track, all four forms: no-`get` **ERR**, `get location of t` ✓, `get location
+  of track 5 of src` ✓, `set L to location of t` then `POSIX path of L` ✓.
+  Inside a `try` this is invisible: a walk of all 6548 tracks returned **zero**
+  uploaded files while a bulk status read said 330, and the only symptom was an
+  empty file. It also produced a wrong diagnosis in the same session — a merged
+  entry was written up as "the import never attached a file" when the file was
+  there all along. **A `try` whose body can fail for a reason you have not
+  enumerated is not error handling, it is a blindfold.**
 - **A list of specifiers cannot be bulk-read.** `get name of (every track whose
   …)` fails; only `get name of every track of <container>` works. So filtering
   and bulk-reading cannot be combined — read the whole container, then index.
@@ -278,16 +410,37 @@ their artwork. Anything reached through `track_sources.json` or
 `album_sources.json` passes `vouched=True`. Demoting a human verdict is the same
 defect as forgetting it.
 
-## The storefront is configuration, and it is not the OS region
+## The storefront is readable, and it is not the OS region
 
 `AppleLocale` is a macOS setting. The Apple Media Services storefront follows
 the **Apple ID's country**. Reading `en_US@rg=byzzzz` as "the Belarusian store"
 ran a whole availability survey of 27 tracks against a catalogue that was not
-the user's, while his own share links said `/ge/`. Music does not expose the
-account store to AppleScript and it is in no readable preference, so it cannot
-be detected — `STORE` is an env var (`GEO_UNBLOCKED_STORE`), defaulting to `us`
-because that is what an omitted `country` has always silently meant, and 135 of
-229 covers were resolved that way.
+the user's, while his own share links said `/ge/`.
+
+**This file then said the storefront "cannot be detected", and that was wrong.**
+The mistake was looking in Music: the app does not expose the account store to
+AppleScript, so the search stopped there. The signed-in account's storefront is
+in `itunesstored`, as a number:
+
+```bash
+defaults read com.apple.itunesstored AccountsNotificationPlugin.ActiveStorefrontIdentifier
+# 143615-2,42     -- storefront id, then a platform suffix
+```
+
+And nothing has to map that number to a country code, because **the iTunes
+Search API takes the id directly as `s=`** in place of `country=`. Measured
+2026-10-16: `search?s=143615` answers `"country": "GEO"`, while `country=rs`
+answers `SRB` and `country=by` answers `BLR`. So this account is on the
+**Georgian** store — exactly what the share links said, for the whole project,
+while `STORE` silently defaulted to `us`. `account_storefront()` reads it now;
+`GEO_UNBLOCKED_STORE` still overrides, and `country=us` is the fallback when the
+preference cannot be read, because that is what an omitted `country` has always
+silently meant and 135 of 229 covers were resolved that way.
+
+**Moving countries does not change it.** The user went Belarus → Serbia between
+passes and the storefront stayed `ge`; only the Apple ID's country moves it. So
+"he is in a new country" is never by itself a reason to re-survey availability —
+but newly geoblocked tracks appear anyway, 13 of them on 2026-10-16.
 
 **How much the storefront actually matters, measured** on the 14 tracks still
 dead on 2026-08-20, across `ge`/`by`/`us`: 11 identical. Two apparent
@@ -330,6 +483,41 @@ Killers and Nickelback. Searching the artist's catalogue instead
 (`attribute=artistTerm`) returned all 178 of their tracks — proving the artist
 is there — while the specific release was simply not in that storefront.
 Spotify had it, reachable through oEmbed with no account.
+
+## A 30-second preview is a reference recording
+
+Deezer and Spotify both hand out a short clip of the exact master with no
+account, and a clip is all an audio comparison needs. That turns "the record
+exists but we cannot have it" from a dead end into a *ruler*: download the
+candidates, slide the preview along each one, and the right lineage shows up as
+a sharp peak at a definite offset. Measured on three tracks, 2026-10-16:
+
+- `The Imperas :: Twin Peaks Theme` — the 20.8s Spotify preview matched a
+  **`Spirit - Topic`** upload at **0.97**, at offset 75.5s, and an independent
+  `The One World Ensemble` upload at **0.97** at the same offset, while three
+  other uploads of a song by that title scored 0.48, 0.32 and 0.20. Durations
+  agree to 15ms (150.706 against 150.721).
+- `Сатана Печёт Блины :: Sigma` — the Deezer preview against the one plausible
+  candidate: **0.68**, against a different track of the same length **0.18**,
+  against itself shifted **1.000**. 0.68 is not a re-upload; it is the cover the
+  title said it was, and the measurement is what settled it.
+- The calibration matters as much as the number. Run the preview against itself
+  and against a known-wrong track of the same length before trusting a middle
+  value.
+
+**And this is how a pseudonym release is reached at all.** Budget labels issue
+one master under several invented artist names -- the same Twin Peaks recording
+is `The Imperas` on Spiritual Health, `Spirit` on Travelscape and
+`The One World Ensemble` on K-tel. No artist-keyed query can find it, and
+`score()`'s artist requirement would reject the file even when handed it. So the
+route is: find the release on Spotify by title, take its preview, and use the
+preview to identify which differently-credited upload is the same recording.
+Spotify's own related-tracks list named the pseudonym first, which is a free
+lead worth checking before any of this.
+
+This is the same lesson as `FPS Allstars` being published as `Geek Music`, with
+a method attached: **the library's artist is often not the distributor's artist,
+and the audio is the only identifier that survives the renaming.**
 
 ## Verified discovery beats a trusted caption
 
@@ -443,6 +631,39 @@ duration rule actively preferred the bad one.** Two independent uploaders
 agreeing at 0.93 is evidence no title carries. Not in the code yet; the open
 questions are when to spend the downloads and what to do when the vote splits.
 
+**The RMS envelope is not enough: correlate the waveform, segment by segment.**
+Measured 2026-10-16 on twelve candidates for `Sex Bob-Omb :: Summertime`. The
+envelope method above put the file this tool had already imported at **0.64-0.70**
+against the master cluster -- low, but not obviously disqualifying, and five
+independent uploads of the master sat at 0.81-0.99 among themselves, so the two
+bands overlap. Aligning the files and correlating the **waveform** at 8kHz
+through a 3kHz low-pass, in 5-second segments, separates them with no overlap at
+all: five uploaders agree at **0.97-0.99 in every one of 26 segments**, and the
+imported file reads **0.00, dipping to -0.13**.
+
+Why the envelope was fooled: that file is not a different take and not a radio
+rip. It is the master **shifted -12 cents and band-limited to 16.5kHz** -- its
+spectrum matches the master at 0.998 once the shift is undone. A pitch shift
+leaves the loudness contour almost intact, which is all the envelope sees, while
+destroying phase alignment, which is what the waveform sees. So:
+
+- **Envelope correlation answers "is this the same performance".** It is cheap
+  and it did separate `Winter Jam` from `Holiday Jam` -- same 285.04s length,
+  same file size, different pieces -- at 0.377 against 0.976 for two copies of
+  the same track.
+- **Waveform correlation answers "is this the same file lineage".** Use it to
+  pick between candidates that already passed the envelope test. It also caught
+  Beck's own solo release of this recording at **-0.36**: a genuinely different
+  mix, 1s shorter, which no title or duration check would have flagged.
+- **A bigger container is not better audio.** The copy being replaced is 325kbps
+  with content to 16.5kHz; the one replacing it is 192kbps with content to
+  21.3kHz and `encoded_by=iTunes 9.2.1` in its tags. Bitrate ranks the encode,
+  not the recording.
+
+Still not in the code. The open questions are unchanged -- when to spend the
+downloads, what to do when the vote splits -- but the method to run when it is
+worth spending them is now settled, and it is two stages, not one.
+
 **Measure the file that arrived. Always, not conditionally.** Every duration
 decision before the download is made on metadata the *source* supplied. The
 silence measurement used to run only when the advertised length was already
@@ -534,6 +755,41 @@ cleanly.** Measured on the three imports of 2026-08-20:
 
 Twenty-three listens is not a distributed recording. Both numbers are in the
 yt-dlp JSON already (`view_count`, `like_count`) and neither is consulted.
+
+**Verify the TITLE every time too — that half was missing.** "Verify the
+artist" has been in this file since the beginning and the converse never was, so
+`score()` had `NO_ARTIST_CAP` and no equivalent for the title. The artist can be
+right while the title names a different song, and the duration window is four
+seconds wide, which is enough. Found by a mechanical sweep of all 249 `ok` rows,
+comparing each candidate's title to the title it replaced — **three shared not
+one word with it**, and all three had auto-imported:
+
+| wanted | imported instead | score |
+|---|---|---|
+| `MARU NARA :: I GET DOWN (feat. Nvpvlm)` (ZE, 92s) | `BREAK A LEG` (OMA HOODY, 90s) | 122 |
+| `$uicideBoy$ :: N****z` (Magnolia, 261s) | `Now and at the Hour of Our Death (Feat. Bones)` — **from a 2025 album** | 137 |
+| `Gin Wigmore :: Oh My` (Holy Smoke, 257s) | `Hey Ho` (261s), her own, different song | 123 |
+
+All three came from the artist's own channel, so every artist check passed. The
+bar is 120 and the duration alone is worth 100. `NO_TITLE_CAP` now parks a
+non-vouched zero-overlap candidate at 115 instead of importing it.
+
+The honest cost: it also parks a **translated** title, which is sometimes right
+— `Antoine Barry :: Капитан Джек Воробей` is published as `Capitán Jack Sparrow`,
+zero shared tokens, and genuinely the same record. That is one human verdict in
+`track_sources.json`, which is where human verdicts belong anyway, against three
+wrong songs in the library. Measured both ways before choosing:
+
+| candidate | before | after |
+|---|---|---|
+| `Severed` ← `The Decemberists - Severed` | 144 | 144 |
+| `No Fun (Bonus Track)` ← `Sex Bob-Omb - No Fun` | 144 | 144 |
+| the three above | 122–137 → imported | 117 → parked |
+| `Капитан Джек Воробей` ← `Capitán Jack Sparrow` | 125 → imported | 117 → parked |
+
+**And run that sweep again after any scoring change.** It took one query over
+`state.json` to find three years' worth of wrong songs; nothing else in this
+project had ever compared the two titles after the fact.
 
 **Verify the artist, every time.** Three near-misses came from matching a title
 and a duration and nothing else: a different artist's "Лодка" with a convincing
@@ -657,13 +913,22 @@ recovered from anywhere once the dead entry is gone.
   1. `store` — in the user's Apple Music storefront, artist and duration both
      matching. He clicks add, the history is carried across. Worked twice on
      2026-08-20.
-  2. `deezer` — published, but not in Apple Music. **There is nothing to click.**
+  2. `foreign` — in Apple Music, but in a storefront this account cannot reach.
+     **There is nothing to click here either**, and for one revision this
+     function said there was: `Sex Bob-Omb :: Summertime` is streamable at
+     130.733s in `us` and absent from `ge` altogether, and it was reported as
+     `store` with a `/us/` link. `itunes()` merges the own store with `us` on
+     purpose -- right for artwork, wrong for availability -- so each result now
+     carries `_own_store` and only an own-store hit may answer `store`. The
+     news is still worth printing: the record exists and may reach his store
+     later.
+  3. `deezer` — published, but not in Apple Music. **There is nothing to click.**
      You cannot add a Deezer track to an Apple Music library, and one revision
      of this printed "добавь из стриминга" about `Сатана Печёт Блины :: Sigma`,
      which is in no Apple storefront under any of four query forms. What it is
      still worth saying: the record is real, so title, artist and length are
      confirmed and a copy may surface later.
-  3. `maybe` — the title and duration match in the store but the artist does
+  4. `maybe` — the title and duration match in the store but the artist does
      not, which is exactly what an aggregator credit looks like. Requiring the
      artist made the check blind to `FPS Allstars :: No Place for No Hero`,
      published as **Geek Music** — the very case that prompted writing it.
@@ -699,6 +964,21 @@ recovered from anywhere once the dead entry is gone.
   instead of "we have never once succeeded here, which is suspicious." **A
   provider with a 0% delivery rate is a bug report, not a fact about the world.**
 
+- **YouTube downloads again, as of 2026-10-16.** yt-dlp 2026.08.19 fetches audio
+  with no cookies and no PO token, through the `visionOS` player API; the
+  `LOGIN_REQUIRED` wall described below is simply gone. Verified on a video out
+  of `track_sources.json` that the August pass could not touch, and across the
+  whole 2026-10-16 run. **So the wall was a yt-dlp/YouTube version problem, not a
+  property of the source** — which is the same lesson Mail.ru taught: a provider
+  that searches and never delivers is a bug report, not a fact about the world.
+  Re-test it before writing off `yt`; it is the best source when it works
+  (`- Topic` channels), and four months of notes said otherwise.
+  Two smaller things measured the same day: a `Requested format is not
+  available` from `-f bestaudio[ext=m4a]/bestaudio` **is transient** — the same
+  url succeeded on retry and again by hand, so do not add a format fallback for
+  it; and dropping `-f` entirely gets a 15.8MB m4a where the format-selected
+  download gets 5.0MB of the same 310s audio, i.e. a transcode from opus, not
+  better quality. Keep the explicit format.
 - **State of the sources on 2026-08-20**, and the shape of the failures matters
   more than the list: **YouTube** searches fine and refuses every download with
   `playability status: LOGIN_REQUIRED` — verified across every player client

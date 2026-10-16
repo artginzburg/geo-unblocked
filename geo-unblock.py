@@ -42,6 +42,22 @@ LONG_PENALTY_PER_SEC = 0.25
 # own, and the artist bonuses were pure headroom that could never be
 # load-bearing: an unrelated performer's song of the same name auto-imported.
 NO_ARTIST_CAP = 115
+# The mirror of the rule above, and it was missing for the whole project: the
+# artist can be right while the title names a different song. Measured
+# 2026-10-16 by comparing every `ok` row's candidate title to the wanted one --
+# three of 249 imports shared NOT ONE WORD with the title they replaced, and all
+# three were auto-imported on artist evidence plus a duration inside the window:
+#   MARU NARA  'I GET DOWN (feat. Nvpvlm)' (ZE, 92s)  <- 'BREAK A LEG' (OMA HOODY, 90s), 122
+#   $uicideBoy$ 'N****z' (Magnolia, 261s)             <- 'Now and at the Hour of Our
+#                                                        Death (Feat. Bones)' (2025!), 137
+#   Gin Wigmore 'Oh My' (Holy Smoke, 257s)            <- 'Hey Ho' (261s), 123
+# A candidate sharing no word with the wanted title is, by definition, something
+# only a person can vouch for -- so it is parked for review instead of imported,
+# and an approval goes in `track_sources.json` where it outlives the run. That
+# costs one human verdict on the legitimate case this catches (a TRANSLATED
+# title: `Капитан Джек Воробей` is published as `Capitán Jack Sparrow`, zero
+# shared tokens, and genuinely right) against three wrong songs in the library.
+NO_TITLE_CAP = 115
 # Words that name a different rendition, not a different release position. Used
 # twice: to penalise a candidate advertising one, and to decide whether a
 # qualifier the library carries may be dropped when matching titles.
@@ -638,6 +654,11 @@ def score(entry, name, artist, want_dur, lenient=False, vouched=False, provider=
     # check silently rejected a compilation it was explicitly told to trust.
     if not vouched and not (tokens(artist) & (tokens(uploader) | t)):
         s = min(s, NO_ARTIST_CAP)
+    # And the converse. `want_tokens`, not `tokens(name)`: a droppable qualifier
+    # has already been removed above, so "(Bonus Track)" cannot make a title look
+    # unrelated here.
+    if not vouched and want_tokens and not (want_tokens & t):
+        s = min(s, NO_TITLE_CAP)
     # A source with nothing behind the name has to earn it on the clock instead.
     if provider == "sc" and not vouched and abs(diff) > SC_TIGHT:
         s = min(s, NO_PROVENANCE_CAP)
@@ -833,21 +854,60 @@ def effective_duration(path):
     return dur - lead - tail
 
 
-# The storefront every itunes.apple.com lookup runs against. It CANNOT be
-# detected. macOS's `AppleLocale` is an OS region setting, not the Apple Media
-# Services store, which follows the Apple ID's country -- reading
-# `en_US@rg=byzzzz` as "the Belarusian store" is how a whole availability survey
-# was run against the wrong catalogue while the user's own share links said
-# `/ge/`. Music does not expose the account store to AppleScript and it is not
-# in any readable preference, so this is configuration, not inference.
+# The storefront every itunes.apple.com lookup runs against.
 #
-# Left at `us` because that is what an omitted `country` has always meant, and
-# 135 of 229 covers were resolved that way. Availability is the part that needs
-# the real one: measured across the 14 tracks still dead on 2026-08-20, ge/by/us
-# agreed on 11, two apparent differences were HTTP 403s that rechecked as real
-# absences, and exactly one was genuine -- `Sex Bob-Omb :: No Fun (Bonus Track)`
-# exists, streamable and exact, in `us` alone.
-STORE = os.environ.get("GEO_UNBLOCKED_STORE", "us")
+# macOS's `AppleLocale` is an OS region setting and NOT the Apple Media Services
+# store, which follows the Apple ID's country -- reading `en_US@rg=byzzzz` as
+# "the Belarusian store" is how a whole availability survey was run against the
+# wrong catalogue while the user's own share links said `/ge/`. Music does not
+# expose the account store to AppleScript either. For most of this project that
+# added up to "it cannot be detected", which was wrong: see
+# `account_storefront()` below, which reads it off `itunesstored`.
+#
+# How much it actually matters, measured across the 14 tracks still dead on
+# 2026-08-20: ge/by/us agreed on 11, two apparent differences were HTTP 403s
+# that rechecked as real absences, and exactly one was genuine --
+# `Sex Bob-Omb :: No Fun (Bonus Track)` exists, streamable and exact, in `us`
+# alone. So `itunes()` still merges the account's store WITH `us`, and 135 of
+# 229 covers were resolved through `us`. What the detection buys is telling the
+# two apart afterwards: a record found only in `us` is news, not an action.
+def account_storefront():
+    """The Apple Media Services storefront, read off the machine instead of guessed.
+
+    This file said for the whole project that the storefront "is in no readable
+    preference, so it cannot be detected". That was wrong, and the mistake was
+    looking in Music's own preferences: the signed-in account's storefront lives
+    in `itunesstored` as a numeric id, and the iTunes Search API accepts that id
+    directly as `s=` -- so nothing has to map it to a country code at all.
+
+    Measured 2026-10-16: the id here is 143615, and `search?s=143615` answers with
+    `"country": "GEO"` while `country=rs` answers `SRB` and `country=by` answers
+    `BLR`. So this account is on the GEORGIAN store -- exactly what the user's own
+    share links said all along, while `STORE` silently defaulted to `us`. Moving
+    between countries does not change it; only the Apple ID's country does.
+
+    Returns the ready query fragment, so a detected id and a configured country
+    code are interchangeable to the caller."""
+    env = os.environ.get("GEO_UNBLOCKED_STORE")
+    if env:
+        return f"country={env}"
+    try:
+        r = subprocess.run(
+            ["defaults", "read", "com.apple.itunesstored",
+             "AccountsNotificationPlugin.ActiveStorefrontIdentifier"],
+            capture_output=True, text=True, timeout=10)
+        # The value is "143615-2,42" -- the storefront id, then a platform suffix.
+        m = re.match(r"\s*(\d{6})", r.stdout)
+        if m:
+            return f"s={m.group(1)}"
+    except Exception:
+        pass
+    # `us` is what an omitted country has always silently meant here, and 135 of
+    # 229 covers were resolved that way -- so it stays the fallback, not an error.
+    return "country=us"
+
+
+STORE = account_storefront()
 
 
 def itunes(term, entity, country=None):
@@ -865,9 +925,9 @@ def itunes(term, entity, country=None):
     below the cut, and a truncated list also reads as an absence."""
     import urllib.parse, urllib.request
     out, seen = [], set()
-    for c in dict.fromkeys([country or STORE, "us"]):
+    for c in dict.fromkeys([f"country={country}" if country else STORE, "country=us"]):
         url = (f"https://itunes.apple.com/search?term={urllib.parse.quote(term)}"
-               f"&entity={entity}&limit=25&country={c}")
+               f"&entity={entity}&limit=25&{c}")
         res = []
         # Apple throttles with HTTP 403 after a burst, and an unretried 403 is
         # returned here as an empty list -- the same value that means "this
@@ -890,6 +950,13 @@ def itunes(term, entity, country=None):
             k = r.get("trackId") or r.get("collectionId")
             if k not in seen:
                 seen.add(k)
+                # Which storefront answered. Artwork does not care -- 135 of 229
+                # covers came from `us` -- but AVAILABILITY does: "add it from
+                # Apple Music" about a record that exists only in a store this
+                # account cannot reach is advice to click something that is not
+                # there. The own-store leg runs first, so a record carried by
+                # both keeps `True`.
+                r["_own_store"] = (c == STORE)
                 out.append(r)
     return out
 
@@ -1061,7 +1128,7 @@ def released_where(row, want):
                 and bool(tokens(row["Artist"]) & tokens(artist))
                 and bool(tokens(row["Name"]) & tokens(title)))
 
-    maybe = None
+    maybe, foreign = None, None
     for term in (f'{row["Artist"]} {base_title(row["Name"])}', base_title(row["Name"])):
         for r in itunes(term, "song"):
             if not r.get("isStreamable"):
@@ -1076,7 +1143,17 @@ def released_where(row, want):
             if not (want_t & got_t):
                 continue
             if tokens(row["Artist"]) & tokens(r.get("artistName", "")):
-                return "store", link
+                if r.get("_own_store"):
+                    return "store", link
+                # Right record, wrong shop. Measured 2026-10-16: `Sex Bob-Omb ::
+                # Summertime` is streamable at 130.733s in `us` and absent from
+                # `ge` entirely, and this function reported it as `store` with a
+                # `/us/` link -- an instruction the user cannot carry out, and
+                # the same defect the docstring describes for Deezer. Keep it as
+                # news, not as an action.
+                if foreign is None:
+                    foreign = ("foreign", link)
+                continue
             # EVERY word of the wanted title, not merely some. Partial overlap is
             # what produced every false lead measured: "Confidential Liar (Live)"
             # answered by "Keep It Confidential" on the word `confidential`
@@ -1103,6 +1180,11 @@ def released_where(row, want):
     for t in data:
         if fits(t["artist"]["name"], t["title"], t.get("duration", 0)):
             return "deezer", t.get("link")
+    # A confirmed Apple record in another storefront says more than a Deezer
+    # listing and more than an aggregator guess, so it is preferred to `maybe`
+    # -- but it is still not something to click.
+    if foreign:
+        return foreign
     # Last, because a guess must never shadow a fact: for `Сатана Печёт Блины ::
     # Sigma` the store offers an unrelated "Sigma" by Epic Soul Factory while
     # Deezer confirms the real release, and returning the guess first hid it.
@@ -2380,6 +2462,9 @@ end tell'''], capture_output=True, text=True, timeout=180).stdout
             elif rel.startswith("maybe:"):
                 print(f"      возможно это оно, но артист записан иначе — проверь:"
                       f"\n      {rel[6:]}")
+            elif rel.startswith("foreign:"):
+                print(f"      есть в Apple Music, но в другой витрине — не в твоей:"
+                      f"\n      {rel[8:]}")
             elif rel.startswith("deezer:"):
                 print(f"      издан, но ни в Apple Music, ни у источников: {rel[7:]}")
     print()
@@ -2538,6 +2623,9 @@ def main():
                     if where == "store" else
                     f"Возможно это оно, артист записан иначе — проверь:\n      {link}"
                     if where == "maybe" else
+                    f"Он есть в Apple Music, но в ДРУГОЙ витрине — в твоей его нет,\n"
+                    f"      добавить нечего: {link}"
+                    if where == "foreign" else
                     f"Издан ({link}), но в Apple Music его нет —\n"
                     f"      добавить нечего, ждём, пока где-нибудь всплывёт копия"))
             else:
