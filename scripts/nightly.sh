@@ -16,6 +16,17 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 mkdir -p work/logs
 LOG="work/logs/nightly-$(date +%F).log"
 step() { echo "\n== $(date '+%H:%M:%S') $*"; python3 -u geo-unblock.py "$@" || echo "!! step failed: $*"; }
+
+# Music must be running for every step, and must not take the screen: launched
+# here hidden and in the background (-j, -g) rather than by the first AppleScript
+# call, which could bring it to the front -- this job may fire when the Mac wakes
+# in the morning, with someone at the keyboard. Quit again only if we opened it.
+started_music=0
+if ! pgrep -xq Music; then
+  open -gj -a Music && started_music=1
+  for i in {1..30}; do pgrep -xq Music && break; sleep 1; done
+  sleep 5
+fi
 {
   echo "== geo-unblocked nightly, $(date)"
   step --snapshot
@@ -28,5 +39,8 @@ step() { echo "\n== $(date '+%H:%M:%S') $*"; python3 -u geo-unblock.py "$@" || e
   fi
   step --report
 } >> "$LOG" 2>&1
+if (( started_music )); then
+  osascript -e 'tell application "Music" to if player state is stopped then quit' >/dev/null 2>&1
+fi
 # A month of logs is plenty.
 find work/logs -name 'nightly-*.log' -mtime +31 -delete
