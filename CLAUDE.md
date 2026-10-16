@@ -590,6 +590,49 @@ The obvious next use: tracks parked with a plausible candidate and nothing to
 check it against — `Hobart Ocean :: Confidential Liar (Live)` has a 2010 live
 video and no reference at all.
 
+### More places a dead track's preview survives — measured 2026-10-16
+
+- **Genius keeps Apple's preview URL.** `https://genius.com/songs/<song id>/apple_music_player`
+  embeds the `audio-ssl.itunes.apple.com/…plus.aac.p.m4a` of the track Genius
+  linked, and the CDN still serves it after Apple drops the track. It gave the
+  only reference for `MARU NARA :: I GET DOWN`, whose album was re-delivered
+  without it and whose Apple page Wayback never captured.
+- **A Wayback snapshot of a Spotify track page holds `p.scdn.co/mp3-preview/…`**,
+  and that URL also still answers: a 2020 snapshot gave 30s of `Yartie :: Marked
+  Bills`, restricted everywhere today.
+- **song.link's public API is gone (401), but its HTML page still carries
+  `__NEXT_DATA__`** with every platform id it ever matched — Pandora, Tidal,
+  Amazon ASINs, Yandex ids.
+- Reference first, then search: it is what proved `Dead Confederate :: Guns`
+  alive (Apple's AthFest preview against the re-delivered EP: waveform 0.91,
+  background 0.03) and what turned `Twin Peaks` from a lookalike into a match.
+
+### Where the "withdrawn everywhere" tracks actually were
+
+Round three re-asked every source that had *refused* earlier rounds, and three
+of the five "gone from every platform" verdicts fell:
+
+- `Dead Confederate :: Guns` is on Apple Music — the re-delivered EP
+  `Start Me Laughing` (2010, id 371709990), buyable for £0.99 and streamable in
+  GB, the EU, UA and TR. Just not in `ge`.
+- `Hobart Ocean :: Confidential Liar (Live)` is on Spotify, EP id
+  `2bRaFjKyJVWSPpLBYUcNSX`, 232.000s exactly — restricted only from here.
+- `Bass Boosted :: Pyrotex` sat on mp3party at 188.000s; the "missing" 4.3s of
+  the only copy found before were the release's trailing silence.
+
+**mp3party serves a file only with a `Range` header** (yt-dlp sends one; a bare
+curl gets 29 bytes, `failed to get file info: nil`). **And that same 29-byte
+answer also means "listed but not stored"**: on the same host some ids return
+the full file and others never do, cookies and Referer notwithstanding — the
+listing for `MARU NARA :: I GET DOWN` exists and its file does not. Test a
+known-good id beside the candidate before calling it an IP block.
+
+**The built-in browser plays through the user's speakers, with no window.** An
+agent opened an mp3party page there to check Pyrotex, the page autoplayed, and
+the user heard a track with nothing on screen to explain it — only macOS's Now
+Playing showed it. Agents get audio with curl/yt-dlp; a browser tab is for
+reading and is closed afterwards.
+
 ## Verified discovery beats a trusted caption
 
 Spotify covers can be reached with no account: search for the release, take the
