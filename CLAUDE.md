@@ -650,6 +650,8 @@ the second even after the user approved it in chat:
 - reading the stream URL the player had requested, from the page's resource
   entries — "security weaken".
 
+It is not a permission the user can grant: the session was already in
+`bypassPermissions` when both were refused, so switching modes is not a fix either.
 Do not look for a third route; that is working around the block. The user can save
 the files himself (VK has no download button; a browser extension does it) into
 `~/Downloads`, and the tool's part — verify against the reference, import with
