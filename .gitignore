@@ -15,6 +15,12 @@ data/state.json
 # made -- and `data/list.tsv` alone does not match `data/list.tsv.bak-...`.
 data/list.tsv.*
 
+# The whole-library snapshot and the archive's index: the same listening
+# history as the index above, for every track instead of the dead ones.
+data/catalog.tsv
+data/catalog.tsv.*
+data/archive.json
+
 # Download staging; Music copies imports into its own Media folder
 work/
 

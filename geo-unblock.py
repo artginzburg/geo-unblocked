@@ -338,6 +338,131 @@ end tell'''
     return live
 
 
+CATALOG = ROOT / "data" / "catalog.tsv"
+CATALOG_COLS = ["Persistent ID", "Cloud Status", "Name", "Artist", "Album", "Genre", "Year",
+                "Time", "Plays", "Last Played", "Skips", "Date Added", "Bit Rate", "Composer",
+                "Favorited", "Track Number", "Track Count"]
+
+
+def catalog():
+    """Snapshot EVERY track, not only the dead ones -- the history of a track is
+    worth most before it dies.
+
+    `build_index` reads a track at the moment Music already calls it
+    unavailable, and four tracks of 2026-10-16 could not be recovered for the
+    reason that nobody had kept anything about them while they were alive. This
+    is the same bulk read (sixteen fields in one call, so the lists cannot drift
+    apart -- see the snapshot/live-index trap) over the whole library, keyed on
+    `persistent ID`, which survives the moment a track goes dead.
+
+    Monotonic like the index: a row that disappears from the library stays, and
+    counts and favourites only ever go up -- a track deleted, merged or reset by
+    iCloud must not take its record with it."""
+    scr = '''
+on f(v)
+  try
+    if v is missing value then return ""
+    return v as text
+  on error
+    return ""
+  end try
+end f
+
+on dt(d)
+  try
+    if d is missing value then return ""
+    return ((year of d) as text) & "." & ((month of d as integer) as text) & "." & \u00ac
+           ((day of d) as text) & "." & ((hours of d) as text) & "." & ((minutes of d) as text)
+  on error
+    return ""
+  end try
+end dt
+
+tell application "Music"
+  set src to library playlist 1
+  set pss to (get persistent ID of every track of src)
+  set css to (get cloud status of every track of src)
+  set nms to (get name of every track of src)
+  set ars to (get artist of every track of src)
+  set als to (get album of every track of src)
+  set gns to (get genre of every track of src)
+  set yrs to (get year of every track of src)
+  set drs to (get duration of every track of src)
+  set pcs to (get played count of every track of src)
+  set pds to (get played date of every track of src)
+  set sks to (get skipped count of every track of src)
+  set das to (get date added of every track of src)
+  set brs to (get bit rate of every track of src)
+  set cps to (get composer of every track of src)
+  set fvs to (get favorited of every track of src)
+  set tns to (get track number of every track of src)
+  set tcs to (get track count of every track of src)
+  set o to ""
+  repeat with i from 1 to (count of nms)
+    set o to o & my f(item i of pss) & tab & my f(item i of css) & tab & my f(item i of nms) & tab & \u00ac
+      my f(item i of ars) & tab & my f(item i of als) & tab & my f(item i of gns) & tab & \u00ac
+      my f(item i of yrs) & tab & my f(item i of drs) & tab & my f(item i of pcs) & tab & \u00ac
+      my dt(item i of pds) & tab & my f(item i of sks) & tab & my dt(item i of das) & tab & \u00ac
+      my f(item i of brs) & tab & my f(item i of cps) & tab & my f(item i of fvs) & tab & \u00ac
+      my f(item i of tns) & tab & my f(item i of tcs) & linefeed
+  end repeat
+  return o
+end tell'''
+    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=900)
+    if r.returncode != 0:
+        raise RuntimeError(f"не удалось прочитать библиотеку: {r.stderr.strip()[:200]}")
+
+    def num(x):
+        try:
+            return str(int(float(x.replace(",", "."))))
+        except Exception:
+            return ""
+
+    def when(x):
+        try:
+            y, mo, d, h, mi = (int(v) for v in x.split("."))
+            return f"{d:02d}.{mo:02d}.{y}, {h:02d}:{mi:02d}"
+        except Exception:
+            return ""
+
+    fresh = {}
+    for line in r.stdout.split("\n"):
+        p = line.split("\t")
+        if len(p) < len(CATALOG_COLS) or not p[0].strip():
+            continue
+        p = p[:len(CATALOG_COLS)]
+        p[7] = num(p[7]); p[9] = when(p[9]); p[11] = when(p[11])
+        fresh[p[0]] = dict(zip(CATALOG_COLS, p))
+
+    old = {}
+    if CATALOG.exists():
+        for row in csv.DictReader(CATALOG.open(), delimiter="\t"):
+            if row.get("Persistent ID"):
+                old[row["Persistent ID"]] = row
+    for pid, prev in old.items():
+        cur = fresh.get(pid)
+        if cur is None:
+            fresh[pid] = {**prev, "Cloud Status": "gone"}
+            continue
+        try:
+            if int(prev.get("Plays") or 0) > int(cur.get("Plays") or 0):
+                cur["Plays"] = prev["Plays"]
+        except ValueError:
+            pass
+        if (prev.get("Favorited") or "").lower() == "true":
+            cur["Favorited"] = "true"
+    rows = sorted(fresh.values(), key=lambda r: (norm(r["Artist"]), norm(r["Name"])))
+    CATALOG.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CATALOG.with_suffix(".tsv.tmp")
+    with tmp.open("w", newline="") as fh:
+        w = csv.DictWriter(fh, CATALOG_COLS, delimiter="\t", extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+    tmp.replace(CATALOG)
+    live = sum(1 for r in rows if r["Cloud Status"] != "gone")
+    return live, len(rows)
+
+
 def snapshot_refetched():
     """Fold the live state of already-replaced tracks back into the index.
 
@@ -3343,6 +3468,8 @@ def main():
     ap.add_argument("--retry", metavar="STATUS", default=None,
                     help="process only rows already recorded with this status "
                          "(error, review, not_found); far cheaper than a full walk")
+    ap.add_argument("--catalog", action="store_true",
+                    help="snapshot the WHOLE library (history + persistent IDs) into data/catalog.tsv")
     ap.add_argument("--snapshot", action="store_true",
                     help="fold favourites and counts of already-replaced tracks "
                          "back into the index; run before anything destructive")
@@ -3379,7 +3506,7 @@ def main():
     # and not touch -- silently rebuilt a playlist the user had just deleted on
     # purpose. A read-only command must leave the library exactly as it found it.
     if not (a.report or a.review or a.approve or a.dedupe or a.retire_originals
-            or a.snapshot or a.dry_run or a.audition):
+            or a.snapshot or a.catalog or a.dry_run or a.audition):
         ensure_playlists()
     # `--audition` must leave both the library and the record as they were: it
     # exists to be run on a track that is already done, to see what the tool
@@ -3388,6 +3515,10 @@ def main():
     st = load_state()
     # Reads the library, not the index -- it is about Music's own bookkeeping,
     # so it must run before anything insists a track list exists.
+    if a.catalog:
+        live, total = catalog()
+        print(f"в снимке библиотеки: {live} треков сейчас, {total} всего за всю историю снимков")
+        return
     if a.dedupe:
         dedupe(a.apply)
         return
