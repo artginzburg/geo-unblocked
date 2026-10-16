@@ -463,6 +463,115 @@ end tell'''
     return live, len(rows)
 
 
+# Verified copies of LIVE tracks, kept outside ~/Music so Music and
+# LaunchServices never index them (see "Back the library up").
+ARCHIVE = Path(os.environ.get("GEO_UNBLOCKED_ARCHIVE", "~/MusicArchive")).expanduser()
+ARCHIVE_INDEX = ROOT / "data" / "archive.json"
+ARCHIVE_RETRY_DAYS = 14   # a track with no copy found is asked again after this
+
+
+def _archive_load():
+    try:
+        return json.loads(ARCHIVE_INDEX.read_text())
+    except Exception:
+        return {}
+
+
+def _archive_save(idx):
+    tmp = ARCHIVE_INDEX.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(idx, ensure_ascii=False, indent=1))
+    tmp.replace(ARCHIVE_INDEX)
+
+
+def mirror(limit, providers, min_score, pace=3.0):
+    """Keep a verified copy of tracks that still play, so that the day one dies
+    it comes back from disk in seconds instead of from a hunt.
+
+    Every copy is checked against the release's own preview while the release
+    still exists -- the one moment that check is cheap. 2026-10-16 showed the
+    cost of not doing it: the four tracks still dead were the ones whose
+    reference nobody had kept. A track without a reference is recorded as such
+    and asked again later; a copy is only archived when its audio matches.
+
+    Most-played first, so a run cut short still protected what matters most.
+    Incremental and resumable: it can run a little every night."""
+    import shutil
+    if not CATALOG.exists():
+        catalog()
+    rows = [r for r in csv.DictReader(CATALOG.open(), delimiter="\t")
+            if r.get("Cloud Status") in ("subscription", "matched") and (r.get("Time") or "").isdigit()]
+    rows.sort(key=lambda r: -int(r.get("Plays") or 0))
+    idx, now = _archive_load(), time.time()
+    todo = []
+    for r in rows:
+        rec = idx.get(f"{r['Artist']} :: {r['Name']}")
+        if rec and rec.get("status") == "ok" and Path(rec.get("path", "")).exists():
+            continue
+        if rec and rec.get("status") != "ok" and now - rec.get("at", 0) < ARCHIVE_RETRY_DAYS * 86400:
+            continue
+        todo.append(r)
+    have = sum(1 for v in idx.values() if v.get("status") == "ok")
+    print(f"в архиве {have}, без копии {len(todo)}; беру {min(limit, len(todo))}", flush=True)
+    stats = {}
+    for i, r in enumerate(todo[:limit], 1):
+        key, want = f"{r['Artist']} :: {r['Name']}", int(r["Time"])
+        print(f"[{i}] {key}  ({want}s)", flush=True)
+        rec = {"status": "noref", "at": time.time(), "pid": r["Persistent ID"]}
+        R = reference(r, want, quiet=True)
+        if R:
+            rec["status"] = "nomatch"
+            cands = pick(r["Name"], r["Artist"], want, providers, r.get("Album", ""), min_score)
+            for sc, e, prov in cands[:3]:
+                if out_of_play(prov):
+                    continue
+                url = e.get("url") or e.get("webpage_url")
+                try:
+                    f = fetch(url, str(DEST / ("mirror " + safe(key)[:80])))
+                except Exception as ex:
+                    note_refusal(prov, str(ex))
+                    continue
+                if not f:
+                    continue
+                v = compare_audio(R["path"], f)
+                got = container_duration(f) or effective_duration(f) or 0
+                # Longer is fine: the restore cuts the release out of it against
+                # the same reference. Shorter is missing audio.
+                if v and v["same"] and got >= want - DUR_TOLERANCE:
+                    dst = (ARCHIVE / safe(r["Artist"])[:60] / safe(r.get("Album") or "Unknown")[:60]
+                           / (safe(r["Name"])[:80] + Path(f).suffix))
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(f), dst)
+                    rec = {"status": "ok", "at": time.time(), "pid": r["Persistent ID"],
+                           "path": str(dst), "source": url, "prov": prov, "wave": v["wave"],
+                           "env": v["env"], "dur": round(got, 2), "want": want}
+                    print(f"      в архив: {prov}, волна {v['wave']:.2f}, {got:.0f}s", flush=True)
+                    break
+                print(f"      {prov}: " + (f"волна {v['wave']:.2f} при фоне {v['bg']:.2f}" if v else
+                                           "сравнить не удалось") + f", {got:.0f}s — не беру", flush=True)
+                Path(f).unlink(missing_ok=True)
+        else:
+            print("      эталона нет — спрошу снова позже", flush=True)
+        idx = _archive_load()
+        idx[f"{r['Artist']} :: {r['Name']}"] = rec
+        _archive_save(idx)
+        stats[rec["status"]] = stats.get(rec["status"], 0) + 1
+        time.sleep(pace)
+    print(f"\n-- зеркало: {stats} --")
+
+
+def pick_from_archive(row):
+    """A copy archived and verified while the track was alive. Ranked below a
+    human-named source and above any search: its audio has already been matched
+    against the release's own preview."""
+    rec = _archive_load().get(f"{row['Artist']} :: {row['Name']}")
+    if not rec or rec.get("status") != "ok" or not Path(rec.get("path", "")).exists():
+        return None
+    return (998.0, {"duration": rec.get("dur"), "title": row["Name"], "uploader": "archive",
+                    "album": row.get("Album", ""), "url": rec["path"],
+                    "source_url": rec.get("source"), "thumbnails": [], "trusted_art": False},
+            "archive")
+
+
 def snapshot_refetched():
     """Fold the live state of already-replaced tracks back into the index.
 
@@ -994,6 +1103,12 @@ def fetch(url, out_base, attempts=3):
     # keyed on artist+title, never on the url -- so a rejected download from an
     # earlier attempt would be imported and stamped with a different source.
     Path(f"{out_base}.m4a").unlink(missing_ok=True)
+    if url and Path(url).is_file():
+        # An archived copy: already on disk and already verified.
+        import shutil
+        dst = Path(f"{out_base}{Path(url).suffix}")
+        shutil.copy(url, dst)
+        return dst
     if "mp3party.net/" in url:
         return fetch_mp3party(url, out_base)
     # After a few hundred downloads YouTube starts answering "Sign in to confirm
@@ -3468,6 +3583,8 @@ def main():
     ap.add_argument("--retry", metavar="STATUS", default=None,
                     help="process only rows already recorded with this status "
                          "(error, review, not_found); far cheaper than a full walk")
+    ap.add_argument("--mirror", type=int, default=None, metavar="N",
+                    help="archive verified copies of up to N still-playing tracks (most-played first)")
     ap.add_argument("--catalog", action="store_true",
                     help="snapshot the WHOLE library (history + persistent IDs) into data/catalog.tsv")
     ap.add_argument("--snapshot", action="store_true",
@@ -3506,7 +3623,7 @@ def main():
     # and not touch -- silently rebuilt a playlist the user had just deleted on
     # purpose. A read-only command must leave the library exactly as it found it.
     if not (a.report or a.review or a.approve or a.dedupe or a.retire_originals
-            or a.snapshot or a.catalog or a.dry_run or a.audition):
+            or a.snapshot or a.catalog or a.mirror is not None or a.dry_run or a.audition):
         ensure_playlists()
     # `--audition` must leave both the library and the record as they were: it
     # exists to be run on a track that is already done, to see what the tool
@@ -3515,6 +3632,9 @@ def main():
     st = load_state()
     # Reads the library, not the index -- it is about Music's own bookkeeping,
     # so it must run before anything insists a track list exists.
+    if a.mirror is not None:
+        mirror(a.mirror, providers, a.min_score)
+        return
     if a.catalog:
         live, total = catalog()
         print(f"в снимке библиотеки: {live} треков сейчас, {total} всего за всю историю снимков")
@@ -3614,7 +3734,8 @@ def main():
 
         # A named release beats any search: it is the actual record, not a guess
         # about which upload corresponds to it.
-        vouched = pick_from_track_source(row) or pick_from_album(row, want, a.min_score)
+        vouched = (pick_from_track_source(row) or pick_from_archive(row)
+                   or pick_from_album(row, want, a.min_score))
         cands = [vouched] if vouched else pick(
             row["Name"], row["Artist"], want, providers, row.get("Album", ""), a.min_score)
 
@@ -3654,7 +3775,8 @@ def main():
         aliased = False
         tried = set()
         # A named release is the answer, not a guess to be widened past.
-        widened = bool(vouched)
+        # An archived copy that fails its check must not end the search.
+        widened = bool(vouched) and vouched[2] != "archive"
         while True:
             usable = [c for c in cands if not out_of_play(c[2])]
             skipped = len(cands) - len(usable)
@@ -3831,7 +3953,7 @@ def main():
                     if low and not (verdict and verdict["same"]):
                         f.unlink(missing_ok=True)
                         raise AudioMismatch("эталон есть, но сравнить не удалось — без него ниже порога")
-                    src_url = url + (f" [{trim[0]}:{trim[1]}]" if trim else "")
+                    src_url = (e.get("source_url") or url) + (f" [{trim[0]}:{trim[1]}]" if trim else "")
                     if a.audition:
                         f.unlink(missing_ok=True)
                         print(f"      ПРОСЛУШКА: импортировал бы{' по звуку' if low else ''} "
