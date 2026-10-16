@@ -1585,24 +1585,68 @@ def tag(path, row, thumb_url, src_url="", uploader="", trusted_thumb=False, hint
     return art_src
 
 
+_LIVE_INDEX = None
+# Words too common to count as artist evidence: "The Decemberists" and "The
+# Smiths" share `the`, and that is not the same act.
+_ARTIST_STOP = {"the", "and", "feat", "ft", "with", "x"}
+
+
+def _live_index():
+    """Every playable store copy in the library, keyed for fuzzy lookup.
+
+    Read ONCE per process, in one bulk call -- name, artist and cloud status
+    together, so the three lists cannot drift apart (see the snapshot/live-index
+    trap in CLAUDE.md). Our own imports never become `subscription` or
+    `purchased`, and turn `matched` only asynchronously, so a run that imports
+    does not invalidate what this answers."""
+    global _LIVE_INDEX
+    if _LIVE_INDEX is not None:
+        return _LIVE_INDEX
+    scr = '''
+tell application "Music"
+  set src to library playlist 1
+  set nms to (get name of every track of src)
+  set ars to (get artist of every track of src)
+  set cs to (get cloud status of every track of src)
+  set o to ""
+  repeat with i from 1 to (count of nms)
+    set c to ((item i of cs) as text)
+    if c is "subscription" or c is "matched" or c is "purchased" then
+      set o to o & (item i of nms) & tab & (item i of ars) & linefeed
+    end if
+  end repeat
+  return o
+end tell'''
+    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        # Loudly, and without caching the failure: "nothing is live" is the
+        # answer that makes the tool import a duplicate.
+        raise RuntimeError(f"не удалось прочитать живые копии: {r.stderr.strip()[:160]}")
+    idx = {}
+    for line in r.stdout.split("\n"):
+        p = line.split("\t")
+        if len(p) == 2 and p[0].strip():
+            idx.setdefault(norm(p[0]), []).append(tokens(p[1]) - _ARTIST_STOP)
+    _LIVE_INDEX = idx
+    return idx
+
+
 def already_live(name, artist):
     """A geoblocked entry whose song also exists as a playable subscription copy
     needs no replacement -- it was already swapped by hand at some point and the
     dead entry just never got cleaned up. Downloading over it would add a worse
-    128k file next to a 256k one that already works."""
-    esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
-    scr = f'''
-tell application "Music"
-  repeat with t in (every track of library playlist 1 whose name is "{esc(name)}" and artist is "{esc(artist)}")
-    try
-      set cs to (cloud status of t as text)
-      if cs is "subscription" or cs is "matched" or cs is "purchased" then return "1"
-    end try
-  end repeat
-  return "0"
-end tell'''
-    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=120)
-    return r.returncode == 0 and r.stdout.strip() == "1"
+    128k file next to a 256k one that already works.
+
+    It used to ask Music for `name is X and artist is Y`, exact, through a
+    `whose` filter -- and Apple re-credits artists. On 2026-10-16 two index rows
+    said `АИГЕЛ` while the live copies had become `AIGEL`; the exact match
+    failed and the tool imported a duplicate of each, the very thing this
+    function exists to prevent. The title is now compared through `norm()` and
+    the artist by shared tokens, both of which fold Cyrillic to Latin exactly as
+    the scorer does, so the two can no longer disagree about whether a song is
+    the same one."""
+    want = tokens(artist) - _ARTIST_STOP
+    return any(want & have for have in _live_index().get(norm(name), []))
 
 
 def fold_into_index(name, artist, fav, plays):
@@ -1637,55 +1681,105 @@ def fold_into_index(name, artist, fav, plays):
             csv.writer(fh, delimiter="\t").writerows(rows)
 
 
+def _ids_alive(ids):
+    """How many of these persistent IDs the library still holds -- read in bulk,
+    so the answer comes from the library and not from the loop that deleted."""
+    r = subprocess.run(["osascript", "-e",
+                        'tell application "Music" to get persistent ID of every track of library playlist 1'],
+                       capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        raise RuntimeError(f"не удалось перечитать библиотеку: {r.stderr.strip()[:160]}")
+    have = {x.strip() for x in r.stdout.split(",")}
+    return sum(1 for i in ids if i in have)
+
+
 def purge_ours(name, artist):
     """Music matches a re-imported file to the existing entry and KEEPS the old
     one -- so re-running silently changes nothing unless the previous import is
     removed first. Only our own imports are touched: a file track carrying our
     marker (or the bare URL comment older runs wrote), or one sitting in the
     refetched playlist. The user's own local files have neither, and streaming
-    originals are not file tracks at all."""
-    esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
+    originals are not file tracks at all.
+
+    It used to `delete t` inside `repeat with t in (every file track … whose …)`
+    -- both traps this file lists, in a destructive function: `whose`
+    under-returns, and deleting while iterating invalidates the specifiers the
+    loop holds. On 2026-10-16 it returned "1" for `$uicideBoy$ :: N****z` while
+    the file it meant was still there at the same persistent ID. Now: one bulk
+    read picks the targets by persistent ID, a second script deletes exactly
+    those IDs, and the count returned is what a fresh read says is gone."""
     scr = f'''
+on g(v)
+  try
+    if v is missing value then return ""
+    return v as text
+  on error
+    return ""
+  end try
+end g
 tell application "Music"
-  set n to 0
-  set fav to false
-  set plays to 0
+  set src to library playlist 1
+  set ps to (get persistent ID of every track of src)
+  set nms to (get name of every track of src)
+  set ars to (get artist of every track of src)
+  set ks to (get class of every track of src)
+  set cms to (get comment of every track of src)
+  set fvs to (get favorited of every track of src)
+  set pcs to (get played count of every track of src)
   set ours to {{}}
   try
-    set ours to (get database ID of every track of user playlist "{REFETCHED_PLAYLIST}")
+    set ours to (get persistent ID of every track of user playlist "{REFETCHED_PLAYLIST}")
   end try
-  repeat with t in (every file track of library playlist 1 whose name is "{esc(name)}" and artist is "{esc(artist)}")
-    set c to ""
-    try
-      set c to comment of t
-    end try
-    if c starts with "{MARK}" or c starts with "{OLD_MARKS[0]}" or c starts with "{OLD_MARKS[1]}" or ((database ID of t) is in ours) then
-      try
-        if favorited of t then set fav to true
-      end try
-      try
-        if (played count of t) > plays then set plays to (played count of t)
-      end try
-      delete t
-      set n to n + 1
+  set o to ""
+  repeat with i from 1 to (count of ps)
+    if ((item i of ks) as text) is "file track" then
+      set c to my g(item i of cms)
+      set p to (paragraph 1 of (c & return))
+      set o to o & (item i of ps) & tab & (item i of nms) & tab & (item i of ars) & tab & ¬
+        ((item i of ps) is in ours) & tab & p & tab & ((item i of fvs) as text) & tab & ¬
+        ((item i of pcs) as text) & linefeed
     end if
   end repeat
-  return (n as text) & tab & (fav as text) & tab & (plays as text)
+  return o
 end tell'''
-    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=120)
+    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=300)
     if r.returncode != 0:
+        raise RuntimeError(f"не удалось прочитать библиотеку: {r.stderr.strip()[:160]}")
+    targets, fav, plays = [], False, 0
+    marks = (MARK,) + tuple(OLD_MARKS)
+    for line in r.stdout.split("\n"):
+        p = line.split("\t")
+        if len(p) < 7 or p[1] != name or p[2] != artist:
+            continue
+        if not (p[4].startswith(marks) or p[3].strip() == "true"):
+            continue
+        targets.append(p[0])
+        fav = fav or p[5].strip() == "true"
+        try:
+            plays = max(plays, int(p[6]))
+        except ValueError:
+            pass
+    if not targets:
         return "0"
-    parts = r.stdout.strip().split("\t")
-    if len(parts) == 3:
-        # Whatever this file carried that the index does not, the index gets --
-        # it is the only record that survives the delete. A heart added to an
-        # import after the last --snapshot lives nowhere else, and this function
-        # is what destroys it: `No Fun (Bonus Track)` was purged and re-imported
-        # three times in one session and lost its favourite on the first pass,
-        # silently, because the index still said false and apply_export_history
-        # is set-only.
-        fold_into_index(name, artist, parts[1].strip() == "true", parts[2].strip())
-    return parts[0]
+    # Whatever these files carried that the index does not, the index gets FIRST
+    # -- it is the only record that survives the delete. A heart added to an
+    # import after the last --snapshot lives nowhere else, and this function is
+    # what destroys it: `No Fun (Bonus Track)` was purged and re-imported three
+    # times in one session and lost its favourite on the first pass, silently,
+    # because the index still said false and apply_export_history is set-only.
+    fold_into_index(name, artist, fav, str(plays))
+    ids = ", ".join(f'"{t}"' for t in targets)
+    d = subprocess.run(["osascript", "-e", f'''
+tell application "Music"
+  repeat with pid in {{{ids}}}
+    delete (first track of library playlist 1 whose persistent ID is (pid as text))
+  end repeat
+end tell'''], capture_output=True, text=True, timeout=300)
+    left = _ids_alive(targets)
+    if left:
+        raise RuntimeError(f"purge_ours: {left} из {len(targets)} наших копий не удалились "
+                           f"({d.stderr.strip()[:120]})")
+    return str(len(targets))
 
 
 def inherit_history(name, artist, album=""):
@@ -2131,7 +2225,16 @@ def dedupe(apply=False):
   set r to r & ((get persistent ID of every track of src) as text) & B
   set r to r & ((get track number of every track of src) as text) & B
   set r to r & ((get time of every track of src) as text) & B
-  set r to r & ((get played count of every track of src) as text)
+  set r to r & ((get played count of every track of src) as text) & B
+  set cl to {}
+  repeat with c in (get comment of every track of src)
+    try
+      set end of cl to (paragraph 1 of ((c as text) & return))
+    on error
+      set end of cl to ""
+    end try
+  end repeat
+  set r to r & (cl as text)
   return r
 end tell'''
     r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=300)
@@ -2140,12 +2243,16 @@ end tell'''
     cols = [b.split("\x01") for b in r.stdout.rstrip("\n").split("\x02")]
     if len({len(c) for c in cols}) != 1:
         print("столбцы разошлись — читать нельзя:", [len(c) for c in cols]); return
-    keys = ["name", "artist", "album", "status", "pid", "tn", "time", "plays"]
+    keys = ["name", "artist", "album", "status", "pid", "tn", "time", "plays", "comment"]
     lib = [dict(zip(keys, [c[i] for c in cols])) for i in range(len(cols[0]))]
 
     def secs(t):
         p = [x for x in t.split(":") if x.isdigit()]
         return sum(int(v) * 60 ** i for i, v in enumerate(reversed(p))) if p else -1
+
+    marks = (MARK,) + tuple(OLD_MARKS)
+    for t in lib:
+        t["ours"] = t["comment"].startswith(marks)
 
     groups = {}
     for t in lib:
@@ -2156,6 +2263,30 @@ end tell'''
     dups = [v for k, v in groups.items()
             if len(v) > 1 and k[4] >= 0
             and not any(x["status"] == "no longer available" for x in v)]
+
+    # Our imports need a looser key. A download is never the same length to
+    # the second as the store copy, and Apple re-credits artists and re-files
+    # albums, so the strict key above missed `Потанцуем-помолчим` outright:
+    # 241.6s live, 238.6s imported, artist `AIGEL` against `АИГЕЛ`. Same folded
+    # title, a shared artist token and a length within a few seconds is enough
+    # here, because one side carries our marker -- this is never a guess about
+    # two strangers' rows.
+    seen = {x["pid"] for v in dups for x in v}
+    live = {}
+    for t in lib:
+        if not t["ours"] and t["status"] != "no longer available":
+            live.setdefault(norm(t["name"]), []).append(t)
+    for t in lib:
+        if not t["ours"] or t["pid"] in seen:
+            continue
+        mates = [m for m in live.get(norm(t["name"]), [])
+                 if m["pid"] not in seen
+                 and (tokens(m["artist"]) & tokens(t["artist"])) - _ARTIST_STOP
+                 and secs(m["time"]) >= 0 and abs(secs(m["time"]) - secs(t["time"])) <= DUR_TOLERANCE + 2]
+        if mates:
+            g = mates + [t]
+            seen.update(x["pid"] for x in g)
+            dups.append(g)
     if not dups:
         print("дублей не найдено"); return
     print(f"групп-дублей: {len(dups)}, лишних записей: {sum(len(v) - 1 for v in dups)}")
@@ -2213,21 +2344,58 @@ end tell'''
         except Exception:
             return [9999]
 
+    # What the index says each of our imports was GIVEN at import time --
+    # `apply_export_history` copies the dead entry's count onto it.
+    idx_plays = {}
+    if LIST.exists():
+        for row in csv.DictReader(LIST.open(), delimiter="\t"):
+            try:
+                idx_plays[(row["Name"], row["Artist"])] = int(row.get("Plays") or 0)
+            except ValueError:
+                pass
+
+    def num(x):
+        try:
+            return int(x)
+        except (TypeError, ValueError):
+            return 0
+
     plan = []
     for v in dups:
-        v.sort(key=lambda x: when(det.get(x["pid"], {}).get("added", "")))
-        keep, drop = v[0], v[1:]
+        theirs = [x for x in v if not x["ours"]] or v
+        theirs.sort(key=lambda x: when(det.get(x["pid"], {}).get("added", "")))
+        keep = theirs[0]
+        drop = [x for x in v if x is not keep]
         d0 = det.get(keep["pid"], {})
-        # A sum, not a max. The raise-only rule elsewhere exists because
-        # `--repair` reruns; here every row counted listens the others did not.
-        plays = sum(int(x["plays"]) for x in v)
-        skips = sum(int(det.get(x["pid"], {}).get("skips") or 0) for x in v)
+        # Music's own re-downloads: a SUM. Every row counted listens the others
+        # did not, and the raise-only rule elsewhere exists for reruns, not this.
+        plays = sum(num(x["plays"]) for x in theirs)
+        skips = sum(num(det.get(x["pid"], {}).get("skips")) for x in theirs)
+        # Our imports: only what was played ON them counts, because the rest is
+        # a copy of the dead entry's history that the live copy already carries.
+        # Measured 2026-10-16: `AIGEL :: Пыяла` live 2, ours 2, index 2 -- the
+        # plain sum this used to take proposed 4 for two real listens. With no
+        # index row the gain is unknowable, so the larger count wins rather
+        # than inventing listens.
+        for x in v:
+            if x["ours"] and x is not keep:
+                given = idx_plays.get((x["name"], x["artist"]))
+                gain = num(x["plays"]) - given if given is not None else 0
+                # And never below what the index holds: `Meek Mill :: Im a Boss`
+                # had the user's own upload at 23 beside our import at 24, the
+                # index's figure -- adding the gain to 23 lost a listen.
+                plays = (max(plays, given) + max(gain, 0)) if given is not None \
+                    else max(plays, num(x["plays"]))
         last = max((det.get(x["pid"], {}).get("played") or "" for x in v), key=when)
+        last_from = next((x["pid"] for x in v if (det.get(x["pid"], {}).get("played") or "") == last), None)
         fav = any(det.get(x["pid"], {}).get("fav") for x in v)
         # Smart playlists re-evaluate; a plain one simply loses the song.
+        # Not this project's own playlists: `refetched` holds OUR files, and a
+        # store copy kept in place of one does not belong there.
         orphaned = sorted({p for x in drop for p in det.get(x["pid"], {}).get("playlists", [])}
-                          - set(d0.get("playlists", [])))
-        plan.append((keep, drop, plays, skips, last, fav, orphaned))
+                          - set(d0.get("playlists", []))
+                          - {REFETCHED_PLAYLIST, REPLACED_PLAYLIST})
+        plan.append((keep, drop, plays, skips, last, fav, orphaned, last_from))
         print(f"\n{keep['artist']} — {keep['name']} [{keep['time']}]")
         print(f"    оставляю: добавлен {d0.get('added','?')}, {keep['plays']} просл.")
         for x in drop:
@@ -2238,7 +2406,7 @@ end tell'''
         print("\nэто разбор без изменений. Чтобы применить: --dedupe --apply")
         return
 
-    for keep, drop, plays, skips, last, fav, orphaned in plan:
+    for keep, drop, plays, skips, last, fav, orphaned, last_from in plan:
         adds = "\n".join(f'  duplicate k to user playlist "{p}"' for p in orphaned)
         dels = "\n".join(
             f'  delete (first track of library playlist 1 whose persistent ID is "{x["pid"]}")'
@@ -2246,9 +2414,11 @@ end tell'''
         # `set played date of a to played date of b` raises -10006; the date has
         # to be bound to a variable first. Same shape as every other nested
         # specifier Music refuses.
+        # From the row that actually holds the latest date -- this used to take
+        # it from whichever row happened to be dropped first.
         pd = (f'  set d to played date of (first track of library playlist 1 '
-              f'whose persistent ID is "{drop[0]["pid"]}")\n'
-              f'  set played date of k to d\n') if last and last != det.get(keep["pid"], {}).get("played") else ""
+              f'whose persistent ID is "{last_from}")\n'
+              f'  set played date of k to d\n') if last and last_from and last_from != keep["pid"] else ""
         scr3 = f'''tell application "Music"
   set k to (first track of library playlist 1 whose persistent ID is "{keep['pid']}")
   set played count of k to {plays}

@@ -138,10 +138,13 @@ The matcher already folds Cyrillic to Latin for exactly this reason; the
 *liveness probe* does not, so the two disagree about whether a track is the same
 song. Two defects in one line, in fact — it is also a `whose` filter, which this
 file has already measured as under-returning silently (214 against 215). The
-repair is to bulk-read `name`/`artist`/`cloud status` in one call and compare
-with the same token folding the scorer uses. **Not done yet; recorded here so it
-is not rediscovered.** `--dedupe` finds the damage after the fact, but a check
-that only works while Apple's spelling holds still is not a check.
+repair: one bulk read of `name`/`artist`/`cloud status` per run (3.1s over
+6550 tracks), title compared through `norm()`, artist by shared tokens minus a
+few stop-words (`the` alone must not join The Smiths to The Decemberists) —
+the same folding the scorer uses. Checked both ways: all **81** rows the old
+probe had found `already_live` are still found, both `АИГЕЛ` rows now are, and
+`MARU NARA`/`Dead Confederate` still are not; then the real loop was run on the
+two reopened `АИГЕЛ` rows and recorded both `already_live` without importing.
 
 ## A stale `cloud status` makes a working track look dead
 
@@ -159,7 +162,7 @@ entry was written up as "the import never attached a file". Both halves were
 wrong. **Before concluding a track is dead, read its location with `get` and
 look at the file.**
 
-## `purge_ours` deletes inside a `whose` loop, and it reported a delete it did not make
+## `purge_ours` deleted inside a `whose` loop, and reported a delete it did not make
 
 Called by hand on `$uicideBoy$ :: N****z` it returned `1` -- one track deleted,
 history folded into the index -- and the file track carrying our marker was
@@ -176,9 +179,13 @@ them accounted for by this session's imports. So the failure here was a no-op
 and a false report, not a wrong delete -- but the shape of the bug allows a
 wrong delete, and the return value cannot be trusted either way.
 
-**Not fixed yet.** The repair is the one this file already prescribes for every
-other delete: collect `persistent ID`s first, then delete by ID, and report what
-the second read says rather than what the loop counted.
+**Fixed** the way this file prescribes for every other delete: one bulk read
+picks the targets by `persistent ID` (and takes their favourite and count for
+the index first), a second script deletes exactly those IDs, and the number
+returned is what a fresh read says is gone — a target that survives raises.
+Exercised on a throwaway: a 3s silent track with our marker was added, purged
+(returned 1, a fresh read found 0), purged again (returned 0), and its orphaned
+file removed from the media folder by hand.
 
 ### And a merged entry has no original left behind it
 
@@ -264,9 +271,21 @@ are `.movpkg`, comment empty, `subscription`.
   plays, and `--dedupe` proposed "итог: 4 просл." A genuine re-download pair has
   two independent histories; a row carrying our `geo-unblocked ·` comment has a
   copy of the other one's. The discriminator is already in the comment, and
-  `dedupe` does not look at it. **Not fixed; the two rows were deleted by hand.**
-  Also worth knowing: `--dedupe` groups on duration, so it missed the second
-  pair entirely — `Потанцуем-помолчим` was 241.6s live against 238.6s imported.
+  `dedupe` did not look at it. **Fixed:** for a row carrying our marker only
+  what was played *on* it counts — the index says what it was given — so the
+  keeper gets `max(its own count, the index's) + plays gained on our copy`. The
+  floor matters: the first version of the fix took the user's own upload of
+  `Meek Mill :: Im a Boss` at 23 plus nothing and lost a listen against the
+  index's 24. With no index row the larger count wins rather than inventing
+  listens. Music's own re-downloads keep the sum.
+  `--dedupe` also grouped on exact duration, so it missed the second pair
+  entirely — `Потанцуем-помолчим` was 241.6s live against 238.6s imported. Our
+  imports now get a second, looser pass: same folded title, a shared artist
+  token, length within six seconds — loose is safe there because one side
+  carries our marker. A kept store copy is no longer "returned" into the
+  `refetched` playlist, which is for our files. Read-only over the whole library
+  this finds two real pairs and nothing else; `--apply` itself has not been run
+  since the change.
 - **Check playlist membership before deleting.** Smart playlists re-evaluate and
   need nothing, but a plain playlist loses the song when its only member row is
   deleted — re-add the keeper first. Two of the three rows above were in a
