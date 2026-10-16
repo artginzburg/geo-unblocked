@@ -794,6 +794,41 @@ gives zero results, `Summertime Scott Pilgrim` gives eight. `pick()` puts the
 artist in most queries, so every hyphenated artist is searched on YouTube by the
 bare title alone.
 
+## Staying ahead: fingerprints, not copies
+
+**Why tracks die, measured 2026-10-16.** The user moved Belarus → Serbia and
+thirteen tracks died, eleven of them The Decemberists' "I'll Be Your Girl". The
+album is absent from the `ge`, `rs` and `by` catalogues alike and streamable in
+`us` — a territorial rights change on the label's side, not the storefront and
+not the user's location (it would be dead in Belarus too). Other deaths that day
+were re-deliveries (ZE without one track) and withdrawals. None of it is
+preventable from here; all of it is recoverable if the evidence was kept.
+
+**What to keep.** A full verified copy of every live track (`--mirror`) works —
+three of three matched at 0.99-1.00, ~10s each — but for this library it is
+6,200 tracks, 390h of audio, 23-45GB and 21-52h of downloading, spread over
+weeks because YouTube and Apple throttle bursts. The user rejected that, and he
+was right that it buys little: what made the four unrecoverable tracks
+unrecoverable was never the missing file, it was the missing *reference*.
+
+So the default is a fingerprint: the release's preview, re-encoded mono 16kHz
+Opus. Measured on three verified pairs (full preview → compacted):
+
+| kbps | size | waveform score | unrelated track |
+|---|---|---|---|
+| full m4a | ~1MB | 0.99-1.00 | 0.02 |
+| 32 | ~125KB | 0.98-0.99 | 0.02 |
+| **16** | **~60KB** | **0.96-0.97** | 0.02 |
+| 8 | ~30KB | 0.88-0.94 | 0.02 |
+
+16kbps keeps every score well above `WAVE_SAME` (0.85); 8kbps came within 0.03
+of it on one track. ~4s per track including a 1.5s pause for Apple, so the
+nightly job does 1,500 and the library is covered in four or five nights.
+
+**The nightly job runs under launchd and can drive Music** — verified by a
+kickstart on 2026-10-16: snapshot, catalog (85s), refresh-index and the restore
+walk all completed. The first run triggers macOS's Automation prompt.
+
 ## Verified discovery beats a trusted caption
 
 Spotify covers can be reached with no account: search for the release, take the

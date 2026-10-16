@@ -559,6 +559,76 @@ def mirror(limit, providers, min_score, pace=3.0):
     print(f"\n-- зеркало: {stats} --")
 
 
+FINGERPRINT_KBPS = 16     # see fingerprint(): accuracy measured at 8/16/32k
+
+
+def _compact(ref_path):
+    """Shrink a preview to the size of a fingerprint without losing what the
+    comparison needs. Measured 2026-10-16 on three verified pairs: mono 16kHz
+    Opus at 16kbps keeps the waveform score at 0.96-0.97 (full preview: 0.99-1.00;
+    the bar is 0.85) while an unrelated track stays at 0.02 -- for ~60KB instead
+    of ~1MB. 8kbps fell to 0.88 on one track, too close to the bar."""
+    src = Path(ref_path)
+    if src.suffix == ".opus":
+        return src
+    dst = src.with_suffix(".opus")
+    r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-ac", "1", "-ar", "16000",
+                        "-c:a", "libopus", "-b:a", f"{FINGERPRINT_KBPS}k", str(dst)],
+                       capture_output=True, text=True)
+    if r.returncode != 0 or not dst.exists() or dst.stat().st_size < 2000:
+        dst.unlink(missing_ok=True)
+        return src
+    src.unlink(missing_ok=True)
+    return dst
+
+
+def fingerprint(limit, pace=1.5):
+    """Keep a fingerprint of every track that still plays -- the release's own
+    30-second preview, compacted -- instead of a copy of the track.
+
+    The day a track dies, the hunt is automatic but it needs something to judge
+    candidates against, and that is exactly what disappears with the track: the
+    four tracks still dead on 2026-10-16 were the ones nobody had a reference for.
+    Taken while the track is alive, the preview costs one store lookup and ~60KB;
+    the whole 6,200-track library comes to ~370MB, against ~45GB for copies.
+
+    Most-played first; a track with no preview found is asked again after two
+    weeks. Resumable, so it can run a little every night."""
+    if not CATALOG.exists():
+        catalog()
+    rows = [r for r in csv.DictReader(CATALOG.open(), delimiter="\t")
+            if r.get("Cloud Status") in ("subscription", "matched") and (r.get("Time") or "").isdigit()]
+    rows.sort(key=lambda r: -int(r.get("Plays") or 0))
+    idx, now = _load_refs(), time.time()
+    todo = []
+    for r in rows:
+        rec = idx.get(f"{r['Artist']} :: {r['Name']}") or {}
+        if rec.get("path") and Path(rec["path"]).exists():
+            continue
+        if rec.get("missing") and now - rec.get("at", 0) < ARCHIVE_RETRY_DAYS * 86400:
+            continue
+        todo.append(r)
+    have = sum(1 for v in idx.values() if v.get("path"))
+    print(f"слепков {have}, без слепка {len(todo)}; беру {min(limit, len(todo))}", flush=True)
+    got = miss = 0
+    for r in todo[:limit]:
+        key, want = f"{r['Artist']} :: {r['Name']}", int(r["Time"])
+        R = reference(r, want, quiet=True)
+        idx = _load_refs()
+        if R:
+            small = _compact(R["path"])
+            idx[key] = {**idx.get(key, R), "path": str(small), "pid": r.get("Persistent ID")}
+            got += 1
+        else:
+            idx[key] = {"missing": True, "at": time.time(), "pid": r.get("Persistent ID")}
+            miss += 1
+        REFS_INDEX.write_text(json.dumps(idx, ensure_ascii=False, indent=1))
+        if (got + miss) % 50 == 0:
+            print(f"  … {got + miss}: слепков {got}, без превью {miss}", flush=True)
+        time.sleep(pace)
+    print(f"\n-- слепки: новых {got}, без превью {miss} --")
+
+
 def pick_from_archive(row):
     """A copy archived and verified while the track was alive. Ranked below a
     human-named source and above any search: its audio has already been matched
@@ -3583,6 +3653,8 @@ def main():
     ap.add_argument("--retry", metavar="STATUS", default=None,
                     help="process only rows already recorded with this status "
                          "(error, review, not_found); far cheaper than a full walk")
+    ap.add_argument("--fingerprint", type=int, default=None, metavar="N",
+                    help="keep a ~60KB preview fingerprint for up to N still-playing tracks")
     ap.add_argument("--mirror", type=int, default=None, metavar="N",
                     help="archive verified copies of up to N still-playing tracks (most-played first)")
     ap.add_argument("--catalog", action="store_true",
@@ -3623,7 +3695,7 @@ def main():
     # and not touch -- silently rebuilt a playlist the user had just deleted on
     # purpose. A read-only command must leave the library exactly as it found it.
     if not (a.report or a.review or a.approve or a.dedupe or a.retire_originals
-            or a.snapshot or a.catalog or a.mirror is not None or a.dry_run or a.audition):
+            or a.snapshot or a.catalog or a.mirror is not None or a.fingerprint is not None or a.dry_run or a.audition):
         ensure_playlists()
     # `--audition` must leave both the library and the record as they were: it
     # exists to be run on a track that is already done, to see what the tool
@@ -3632,6 +3704,9 @@ def main():
     st = load_state()
     # Reads the library, not the index -- it is about Music's own bookkeeping,
     # so it must run before anything insists a track list exists.
+    if a.fingerprint is not None:
+        fingerprint(a.fingerprint)
+        return
     if a.mirror is not None:
         mirror(a.mirror, providers, a.min_score)
         return
