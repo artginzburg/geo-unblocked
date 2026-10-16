@@ -286,6 +286,14 @@ are `.movpkg`, comment empty, `subscription`.
   opposite of the order used for our own imported files, where the dead entry is
   the only thing holding the record. `data/list.tsv` is what makes deleting
   first safe: it already holds the counts.
+  **The twin is not the only cause.** On 2026-10-16 `Gin Wigmore :: Oh My` was
+  added from the store minutes after its only other row had been deleted — one
+  row in the library, no twin — and the same thing happened: `played count`
+  written as 1 read back 1, and was 0 two minutes later, while `played date`
+  and `comment` held. Written again a few minutes after that, it held at 1 on a
+  check 150s later. So a freshly added subscription track gets reconciled with
+  iCloud's counter once, twin or not. **Write, verify after a delay, and expect
+  to write the count a second time.**
 - **Verify a write after a delay, never by the readback in the same script.**
   Every reverted write in this project read back correct at the moment it was
   made. An immediate `return played count of t` proves the value was accepted,
