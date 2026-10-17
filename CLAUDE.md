@@ -716,6 +716,30 @@ Several others demand a channel subscription first (`@deezload2bot`,
 `@Spotify_downloa_bot`) and were not pursued; `@spotify_downloader_bot` never
 answered. Telegram's global search reaches only the account's own chats.
 
+### Soulseek: reachable, and it did not have the last three
+
+Set up 2026-10-17. Soulseek has no sign-up page: an account is created by the
+first login with an unused name, so the user did that in SoulseekQt and wrote
+the name and password to `~/.config/geo-unblocked/soulseek` (two lines, mode
+600, outside the repo). Scripts use `aioslsk` 1.7.1 (needs Python >= 3.11, so a
+venv on Homebrew's Python under `~/.cache/geo-unblocked/`), with UPnP OFF so
+nothing is mapped on the user's router, and no shares. **Quit SoulseekQt
+first** -- the server allows one session per name and drops the other.
+
+Seven queries, 30s each, returned 46,266 files from about 1,200 peers. For the
+last three dead tracks: `Yartie` and `Marked Bills` -- zero results;
+`Mark Daniel` -- 660 peers, nothing near `Can't Do It Like Me` by title or
+length; `Hobart Ocean` -- only Vanattica's studio `Confidential Liar`.
+`$uicideBoy$ :: N****z` is a 2017 bootleg ("Suicide Boys", album `Magnolia`,
+261.923s); the only real `$uicideboy$` song of that length is `Fuck a Hoe`, and
+every FLAC of it measures **261.172s** -- 0.75s off, which a re-upload can
+explain and a different song can too. With no preview of the bootleg anywhere
+(Spotify `COUNTRY_RESTRICTED`, no Wayback capture of the track, the artist, or
+an Apple `Magnolia` album from 2017), it stays unverified and was not imported.
+
+Downloads work, with one trap: asking 50 peers at once filled the folder with
+`(1)`, `(2)` partial copies of the same file. Ask a few, in order.
+
 ## The reference is the tool's job, and the audio decides
 
 Everything above was run by hand on 2026-10-16. `reference()` and
