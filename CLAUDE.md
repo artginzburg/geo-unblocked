@@ -697,6 +697,25 @@ then fetches the whole track; some segments are AES-128 (`key.pub` beside them,
 the AthFest preview, Sigma 0.986 against Deezer's (the cover: 0.646), I GET DOWN
 0.980 against Apple's.
 
+### Telegram music bots: tried, and they add nothing for restricted tracks
+
+Measured 2026-10-17 on the last four (with the user's permission to message bots
+from his account). Two kinds answer to "Spotify downloader":
+
+- **Bots that rip Spotify itself** (`@dlmusbot`): a control track came back as a
+  320k mp3 in seconds; all three restricted tracks (`Confidential Liar (Live)`,
+  `Marked Bills`, `N****z`) came back "Couldn't download". The restriction
+  binds the bot's region too, so this is not a way around it.
+- **Bots that search a catalogue** (`@Spotifiy_Mp3Bot`, `@MusikSpotify_bot` --
+  the same engine under two names): a link is turned into a text search, and
+  the results are the VK/YouTube pool already covered -- Vanattica's studio
+  `Confidential Liar` (3:42 against the live 3:52), Yartie's other songs, a
+  Shareef "They Can't Do It Like Me". Nothing new.
+
+Several others demand a channel subscription first (`@deezload2bot`,
+`@Spotify_downloa_bot`) and were not pursued; `@spotify_downloader_bot` never
+answered. Telegram's global search reaches only the account's own chats.
+
 ## The reference is the tool's job, and the audio decides
 
 Everything above was run by hand on 2026-10-16. `reference()` and
