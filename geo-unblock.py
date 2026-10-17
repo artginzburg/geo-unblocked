@@ -2760,7 +2760,54 @@ end tell'''], capture_output=True, text=True, timeout=300)
     if left:
         raise RuntimeError(f"purge_ours: {left} из {len(targets)} наших копий не удалились "
                            f"({d.stderr.strip()[:120]})")
+    # The dead original was parked because a replacement stood beside it. With
+    # the replacement gone it is just a dead track again, and the geoblocked
+    # list already shows it -- left parked, `$uicideBoy$ :: N****z` sat in the
+    # originals playlist for a day with nothing to be the original of. If the
+    # caller re-imports next, park_original files it again.
+    unpark_original(name, artist)
     return str(len(targets))
+
+
+def unpark_original(name, artist):
+    """Take the dead entries for this song out of the originals playlist --
+    out of the playlist only; the library keeps them. Selected and removed by
+    persistent ID; a fresh read afterwards must find none, or it raises."""
+    read = f'''
+tell application "Music"
+  set pl to user playlist "{REPLACED_PLAYLIST}"
+  -- `every track` of an EMPTY playlist is -1728, not an empty list
+  if (count of tracks of pl) is 0 then return ""
+  set ps to (get persistent ID of every track of pl)
+  set nms to (get name of every track of pl)
+  set ars to (get artist of every track of pl)
+  set o to ""
+  repeat with i from 1 to (count of ps)
+    set o to o & (item i of ps) & tab & (item i of nms) & tab & (item i of ars) & linefeed
+  end repeat
+  return o
+end tell'''
+    def parked():
+        r = subprocess.run(["osascript", "-e", read], capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError(f"не удалось прочитать {REPLACED_PLAYLIST}: {r.stderr.strip()[:160]}")
+        return [p[0] for p in (l.split("\t") for l in r.stdout.split("\n"))
+                if len(p) >= 3 and p[1] == name and p[2] == artist]
+    ids = parked()
+    if not ids:
+        return 0
+    lst = ", ".join(f'"{i}"' for i in ids)
+    subprocess.run(["osascript", "-e", f'''
+tell application "Music"
+  set pl to user playlist "{REPLACED_PLAYLIST}"
+  repeat with pid in {{{lst}}}
+    delete (first track of pl whose persistent ID is (pid as text))
+  end repeat
+end tell'''], capture_output=True, text=True, timeout=120)
+    left = parked()
+    if left:
+        raise RuntimeError(f"unpark_original: {len(left)} из {len(ids)} не вынуты из {REPLACED_PLAYLIST}")
+    return len(ids)
 
 
 def inherit_history(name, artist, album=""):

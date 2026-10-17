@@ -446,6 +446,10 @@ that pair is what the originals playlist is for.
   into the existing entry, leaving one track. When it does not, two remain: the
   dead geoblocked one and the new file. The dead one is filed here so it can be
   reviewed and deleted in one pass later.
+  If the replacement is later purged (it turned out to be the wrong song),
+  the original leaves this playlist again: with nothing beside it, it is
+  just a dead track, and the geoblocked list already shows it. Usually the
+  playlist is empty or absent; it is created when something is parked.
 
   Do not empty it by hand, and do not trust that it still holds what it did.
   Once Music merges, a parked reference resolves to the *merged* track, so the

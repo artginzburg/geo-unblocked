@@ -205,6 +205,19 @@ recovery was to add the track back from the store.
 So: **before purging an import, count the rows.** One row means purging removes
 the track, not the replacement.
 
+### And purging must unpark
+
+`park_original` files the dead entry into `originals` *because* a replacement
+stands beside it. `purge_ours` removed the replacement and left the parking in
+place, so `$uicideBoy$ :: N****z` sat in `originals` for a day as the original
+of nothing -- the user asked why one track was in both `originals` and the
+geoblocked list. `purge_ours` now calls `unpark_original`, which removes the
+dead entry from that playlist only (the library keeps it), by persistent ID,
+and raises if a fresh read still finds it. Exercised on two dead tracks parked
+together: unparking one left the other, unparking the second emptied the
+playlist, and the geoblocked list stayed at 4. Note on the way: `get … of every
+track` of an **empty** playlist is -1728, not an empty list -- count first.
+
 ## A read-only command must leave the library as it found it
 
 `ensure_playlists()` ran before the command was dispatched, so `--report` --
