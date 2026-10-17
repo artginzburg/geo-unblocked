@@ -740,6 +740,33 @@ an Apple `Magnolia` album from 2017), it stays unverified and was not imported.
 Downloads work, with one trap: asking 50 peers at once filled the folder with
 `(1)`, `(2)` partial copies of the same file. Ask a few, in order.
 
+The user remembers the track, and it is **not** `Fuck a Hoe`. So the length
+match was a coincidence, which is exactly why a length alone never imports.
+
+**It is a provider now (`sl`, last in the chain).** `scripts/slsk.py` runs in the
+venv and answers JSON; `geo-unblock.py` calls it per query (`search`, ~13s: a
+login plus `SLSK_WAIT`) and per candidate (`get`, one peer, up to 180s). Peers
+are ranked free slot, short queue, lossless, bitrate, so the loop's usual "try
+the next candidate" is "try the same file on the next disk". Measured
+2026-10-17: `Sex Bob-Omb :: Summertime` -- first query, 10 candidates, the top
+one a FLAC that came out at 130.733s (the master's exact length) and compared
+against Apple's preview at waveform **0.978**, background 0.03. `Dead
+Confederate :: Guns` through `--audition --only sl`: nothing by the band, and
+the two Guns N' Roses files the lenient pass reached were downloaded and
+rejected by the audio at 0.02-0.03.
+
+The title it scores is `<grandparent folder> - <file stem>`. The grandparent is
+usually the artist and gives `score()` its artist evidence; the album folder is
+left out because `Expanded Edition` or `Live at …` would read as a rendition --
+`RENDITION` matches substrings, and `edit` is one of them, so any candidate
+title containing "Edition" is charged -45. That is a latent defect for every
+provider, not fixed here.
+
+Unready is not absent: no venv, no credentials file, SoulseekQt running (one
+session per name), or a refused login each print one `sl: Soulseek пропускаю —`
+line and take the provider out for the run. The refused-login path is untested
+on purpose: logging in with an unused name **creates** an account.
+
 ## The reference is the tool's job, and the audio decides
 
 Everything above was run by hand on 2026-10-16. `reference()` and

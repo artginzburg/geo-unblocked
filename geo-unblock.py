@@ -73,7 +73,7 @@ RENDITION = ("cover", "remix", "live", "karaoke", "reaction", "sped up",
 # near-tie, it must never outweigh duration or artist evidence. Without it, "No
 # Fun" imported at 96k from SoundCloud while a 240k copy of the same 134s master
 # sat one rank below, against a library original of 256k.
-PROVIDER_QUALITY = {"mr": 4, "ytm": 3, "yt": 2, "mp": 1, "sc": 0}
+PROVIDER_QUALITY = {"mr": 4, "sl": 3, "ytm": 3, "yt": 2, "mp": 1, "sc": 0}
 # SoundCloud has no equivalent of a `- Topic` channel: an account name is
 # self-declared, so "uploader matches the artist" is not provenance there -- a
 # fan cover of Sex Bob-Omb's "Threshold" was posted by an account named
@@ -937,11 +937,122 @@ def fetch_mp3party(url, out_base):
     return m4a
 
 
+SLSK = ROOT / "scripts" / "slsk.py"
+# aioslsk needs Python 3.11+, and the system python3 is 3.9, so the helper runs
+# in its own venv and answers in JSON. README "Soulseek" says how to make both.
+SLSK_PY = Path(os.environ.get("GEO_UNBLOCKED_SLSK_PYTHON",
+                              "~/.cache/geo-unblocked/slsk-venv/bin/python")).expanduser()
+SLSK_CREDENTIALS = Path(os.environ.get("GEO_UNBLOCKED_SLSK_CREDENTIALS",
+                                       "~/.config/geo-unblocked/soulseek")).expanduser()
+# Seconds to collect answers after a query. Peers answer for minutes, but by 12s
+# a query for a specific track has its useful results: measured on `Sex Bob-Omb
+# Summertime`, 54 files, the first eight all free-slot FLACs of the right length.
+SLSK_WAIT = 12
+SLSK_GET_TIMEOUT = 180
+_SLSK_READY = None
+
+
+def _slsk_off(why):
+    print(f"      sl: Soulseek пропускаю — {why}", flush=True)
+    REFUSALS["sl"] = DEAD_AFTER
+
+
+def _slsk_ready():
+    """Whether Soulseek can be asked at all this run. Every reason it cannot is
+    printed once and takes the provider out -- an absent setup is not "this
+    track is nowhere on Soulseek"."""
+    global _SLSK_READY
+    if _SLSK_READY is None:
+        why = None
+        if not SLSK_PY.exists():
+            why = f"нет окружения {SLSK_PY} (README, раздел Soulseek)"
+        elif not SLSK_CREDENTIALS.exists():
+            why = f"нет файла с логином {SLSK_CREDENTIALS}"
+        elif subprocess.run(["pgrep", "-x", "SoulseekQt"], capture_output=True).returncode == 0:
+            # One session per account: our login would throw the user's out, or
+            # the reverse halfway through a download.
+            why = "открыт SoulseekQt под тем же логином"
+        if why:
+            _slsk_off(why)
+        _SLSK_READY = why is None
+    return _SLSK_READY and not out_of_play("sl")
+
+
+def _slsk(args, timeout):
+    """The helper's JSON answer, or None once Soulseek is out for the run."""
+    r = subprocess.run([str(SLSK_PY), str(SLSK), *args],
+                       capture_output=True, text=True, timeout=timeout)
+    if r.returncode in (3, 4):
+        _slsk_off(jload(r.stdout).get("error") or f"код {r.returncode}")
+        return None
+    if r.returncode != 0:
+        raise RuntimeError(f"sl: {(r.stderr.strip().splitlines() or ['?'])[-1][:120]}")
+    return json.loads(r.stdout)
+
+
+def search_slsk(query, n=12):
+    """Soulseek: what people keep on their own disks, mostly whole releases in
+    FLAC or 320k, and it holds things every store and catalogue has dropped.
+    One query costs a login and SLSK_WAIT seconds, so it is the last provider.
+
+    Paths, not tags, carry the credit: `Artist\\Album\\18 Title.flac`. The
+    artist folder goes into the title so `score()` has artist evidence; the
+    album folder does not, because names like `Expanded Edition` or `Live at`
+    would read as a rendition the track is not. A peer's name is no provenance
+    at all, so `uploader` stays empty, as for Mail.ru."""
+    if not _slsk_ready():
+        return []
+    try:
+        res = _slsk(["search", str(SLSK_WAIT), query], SLSK_WAIT + 60)
+    except Exception as ex:
+        print(f"      sl: поиск не ответил ({str(ex)[:60]})", flush=True)
+        REFUSALS["sl"] = REFUSALS.get("sl", 0) + 1
+        return []
+    out = []
+    for r in res or []:
+        if not r.get("dur"):
+            continue
+        parts = [p for p in re.split(r"[\\/]", r["file"]) if p]
+        stem = Path(parts[-1]).stem
+        title = f"{parts[-3]} - {stem}" if len(parts) >= 3 else stem
+        out.append({"duration": r["dur"], "title": title, "uploader": "",
+                    "url": f"slsk://{r['user']}/{r['file']}", "thumbnails": [],
+                    "abr": r.get("bitrate")})
+    return out[:n]
+
+
+def fetch_slsk(url, out_base):
+    import shutil, tempfile
+    user, remote = url[len("slsk://"):].split("/", 1)
+    m4a = Path(f"{out_base}.m4a")
+    m4a.unlink(missing_ok=True)
+    if not _slsk_ready():
+        raise Refused("Soulseek недоступен в этом прогоне")
+    tmp = Path(tempfile.mkdtemp(prefix="slsk-", dir=DEST))
+    try:
+        res = _slsk(["get", user, remote, str(tmp), str(SLSK_GET_TIMEOUT)], SLSK_GET_TIMEOUT + 60)
+        if res is None:
+            raise Refused("Soulseek недоступен в этом прогоне")
+        if "path" not in res:
+            # This peer: queued, offline or refusing. The next candidate is
+            # usually the same file on another disk.
+            raise RuntimeError(f"sl: {res.get('error')}")
+        # AAC 256k like every other source, and the same as Apple's own files.
+        # From FLAC it is a first-generation encode.
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", res["path"], "-vn",
+                        "-c:a", "aac", "-b:a", "256k", str(m4a)], check=True, timeout=300)
+        return m4a
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def search(query, provider, n=6):
     if provider == "ytm":
         return search_ytm(query, n)
     if provider == "mp":
         return search_mp3party(query, n)
+    if provider == "sl":
+        return search_slsk(query)
     if provider == "mr":
         # Mail.Ru has no search prefix, only a search URL -- and yt-dlp chokes on
         # raw Cyrillic in a URL (latin-1 encode error), so it must be escaped here.
@@ -1181,6 +1292,8 @@ def fetch(url, out_base, attempts=3):
         return dst
     if "mp3party.net/" in url:
         return fetch_mp3party(url, out_base)
+    if url.startswith("slsk://"):
+        return fetch_slsk(url, out_base)
     # After a few hundred downloads YouTube starts answering "Sign in to confirm
     # you're not a bot" from this address, and the default client has no way
     # past it. Asking as the embedded player does, and it hands over the same
@@ -3689,6 +3802,8 @@ def main():
     ap.add_argument("--no-soundcloud", action="store_true",
                     help="YouTube only; skip the SoundCloud fallback")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--only", default=None, metavar="yt,sc,mr,mp,ytm,sl",
+                    help="ask only these providers, in this order")
     ap.add_argument("--audition", action="store_true",
                     help="download and judge candidates against the reference, "
                          "import nothing and write nothing -- not even state")
@@ -3734,8 +3849,11 @@ def main():
     # then Mail.Ru -- a user-upload catalogue that is often the only place old and
     # obscure Russian material still exists.
     # mp3party after Mail.ru: the same kind of catalogue, one request a query,
-    # and ytm stays last because it is the slow one.
-    providers = ["yt"] if a.no_soundcloud else ["yt", "sc", "mr", "mp", "ytm"]
+    # and ytm after them because it is the slow one. Soulseek is slower still --
+    # a login and twelve seconds a query -- and holds what the others dropped.
+    providers = ["yt"] if a.no_soundcloud else ["yt", "sc", "mr", "mp", "ytm", "sl"]
+    if a.only:
+        providers = a.only.split(",")
     DEST.mkdir(parents=True, exist_ok=True)
     # Only when something is actually going to be imported. Creating playlists
     # was unconditional, so `--report` -- a command whose whole job is to look

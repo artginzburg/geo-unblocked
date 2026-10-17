@@ -80,7 +80,7 @@ worse: it has no `Favorited` column, and the favourite flag has no other backup.
    a playable subscription copy needs nothing — it was swapped by hand at some
    point and the dead entry never got cleaned up.
 2. **Finds the audio.** A source named by hand first, then a named release, then
-   searches — YouTube, SoundCloud, Mail.Ru, mp3party, YouTube Music — strictly as
+   searches — YouTube, SoundCloud, Mail.Ru, mp3party, YouTube Music, Soulseek — strictly as
    fallbacks, stopping at the first match good enough to import unattended.
 3. **Verifies by duration**, asymmetrically. Within ±4s of Apple's length is
    accepted. *Shorter* is rejected outright: audio the original had is missing.
@@ -226,6 +226,10 @@ sits behind something the tool does not do, and it says which:
   an absence. mp3party, for one, refuses some addresses outright; the tool asks
   for a file it knows is stored before deciding whether a missing file is the
   listing's fault or the address's.
+- **Soulseek** is asked last, and only once it is set up (below); until then
+  the run says it skipped it, rather than reporting the track missing there.
+  What it holds depends on who is online, which is one more reason the weekly
+  job asks again.
 - **VK** holds tracks no store does, but its search needs a signed-in session,
   and the tool does not sign in.
 - **A store purchase or a stream** it cannot use: it reports when the record is
@@ -397,6 +401,7 @@ python3 geo-unblock.py --repair                        # patch already-imported 
 | `--track 'A :: T'` | process only this row (repeatable); with `--audition`, rows already done too |
 | `--min-score` | confidence below which a match goes to review (default 120) |
 | `--no-soundcloud` | YouTube only |
+| `--only yt,sl` | ask only these providers, in this order (`yt sc mr mp ytm sl`) |
 | `--report` | counts, sources, timings, and anything left in review |
 | `--repair` | fix artwork, history and comments on tracks already imported |
 | `--dedupe` | list library rows that are the same recording twice over |
@@ -467,6 +472,30 @@ allowed. **Keep `yt-dlp` current.** YouTube refused every download with
 2026.08.19, with no cookies and no PO token — so a source that looks dead may
 only be an old binary. Reading files inside `~/Music/Music` additionally needs Full Disk
 Access, but the tool does not need it — it reads artwork out of Music itself.
+
+### Soulseek (optional)
+
+A peer-to-peer network where people share their own music, mostly whole
+releases in FLAC. It holds what stores and catalogues have dropped, and the
+tool asks it last. Setting it up is once:
+
+1. Make an account. Soulseek has no sign-up page: the first login with an
+   unused name creates it. Install the official client
+   (`brew install --cask soulseek`), log in with a name and password you make
+   up, then quit it — the server allows one session per name.
+2. Save the name and password, one per line, outside the repository:
+   ```bash
+   mkdir -p ~/.config/geo-unblocked && read -r "u?Name: " && read -rs "p?Password: " && echo && printf '%s\n%s\n' "$u" "$p" > ~/.config/geo-unblocked/soulseek && chmod 600 ~/.config/geo-unblocked/soulseek
+   ```
+3. Give the helper its Python (it needs 3.11+; macOS ships 3.9):
+   ```bash
+   /opt/homebrew/bin/python3 -m venv ~/.cache/geo-unblocked/slsk-venv && ~/.cache/geo-unblocked/slsk-venv/bin/pip install aioslsk==1.7.1
+   ```
+
+`scripts/slsk.py` does the talking. It never opens a port on your router (UPnP
+off) and shares nothing. Every file it brings goes through the same checks as
+any other source, the reference comparison included. Paths can be moved with
+`GEO_UNBLOCKED_SLSK_PYTHON` and `GEO_UNBLOCKED_SLSK_CREDENTIALS`.
 
 ### Spotify Web API (optional, and probably not worth it)
 
