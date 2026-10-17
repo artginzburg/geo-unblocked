@@ -345,14 +345,12 @@ Logs are in `work/logs/`.
 
 ## Before a full run, back the library up
 
-A slice of thirty is repairable by hand; a full pass is not. Both halves matter,
-and the small one matters more:
+A slice of thirty is repairable by hand; a full pass is not.
 
 Everything this project backs up lives in one folder, `~/Backups/geo-unblocked/`:
 
 ```
 Music Library <date>.musiclibrary   the library database
-own-files/                          files Apple cannot re-serve
 index/                              old copies of data/list.tsv
 archive/                            --mirror copies, if any
 ```
@@ -368,14 +366,13 @@ no download restores — and it is about 170MB. It can only be restored whole,
 which rolls the entire library back to that day, so it is the last resort; one
 recent copy is enough. Day to day, history is restored from `data/list.tsv`.
 
-**Do not copy the whole media folder.** On a subscription the catalogue
-re-downloads from Apple. Measured 2026-10-17: 348 tracks are `uploaded` or
-`matched` — the user's own uploads plus this tool's imports — and their files
-come to 1.8GB. `Media.localized/Music`, where they live, is 9.0GB in 11882
-files, because Music leaves orphans there on every re-import; copying the folder
-blindly is five times larger than the backup. Copy only the files those 348
-tracks point at (walk `file track i` and read `cloud status` and `get location`
-of the same track), keeping their path under `Media.localized/Music`.
+**The media files are not backed up, on purpose.** Subscription tracks
+re-download from Apple. The user's own uploads are kept by iCloud Music Library
+and download again on any device; `matched` ones stream Apple's copy. This
+tool's imports can be fetched again, and the fingerprints confirm the result.
+A copy of the 348 files that are `uploaded` or `matched` was kept for a while
+(1.8GB; copying `Media.localized/Music` wholesale is 9.0GB, mostly orphans Music
+leaves behind) and was never once needed.
 
 Keep the backup outside `~/Music` so Music does not index it.
 

@@ -1153,7 +1153,7 @@ of the 241 tracks have one, and it was being dropped until noticed.
 A slice touches thirty entries and a mistake is repairable by hand. A full pass
 touches every broken track in the library, and this project has already lost
 data twice in ways nobody noticed until much later. Before running the whole
-list, take both:
+list, snapshot the database:
 
 **Do not copy the media folder.** With an Apple Music subscription the catalogue
 re-downloads from Apple; copying it is hours of I/O for nothing. Measured here:
@@ -1162,32 +1162,34 @@ own, and only 149 are `uploaded`/`matched` — the user's own uploads and this
 tool's imports. Their files total **0.41GB in 85 items**. A blind 17GB copy was
 roughly 95% waste.
 
-Two things are irreplaceable, and both are small:
+The database is the one irreplaceable thing:
 
 ```bash
 # 1. the library database — quit Music first, or the snapshot may be inconsistent
 osascript -e 'tell application "Music" to quit'
 ditto ~/Music/Music/"Music Library.musiclibrary" ~/Backups/geo-unblocked/"Music Library <date>.musiclibrary"
 open -a Music
-
-# 2. only the files Apple cannot re-serve: cloud status uploaded or matched
-#    (walk file tracks BY INDEX -- iterating a filtered list yields specifiers
-#     whose properties will not read, and a `try` around it returns nothing at all)
 ```
 
 The database carries play counts, playlists, favourites and add dates — the part
 no download restores — at ~96MB.
 
 **Every backup of this project goes under `~/Backups/geo-unblocked/`** (database,
-`own-files/`, `index/`, `archive/`), and in all its history none was ever read
+`index/`, `archive/`), and in all its history none was ever read
 back. Checked across every session on 2026-10-17: five snapshots, 9.9GB, written
 and never restored from. Everything recovered -- counts, hearts, Wasting Love,
 No Fun, Oh My -- came from `data/list.tsv`. The database can only be restored
 whole (it rolls the library back to that day, and `date added` cannot be written
 any other way), so it is insurance against catastrophe, not a repair tool: keep
-one recent copy, not a series. And copying `Media.localized/Music` wholesale
-took 9.0GB where the files the 348 `uploaded`/`matched` tracks point at are
-1.8GB; the rest is Music's orphans.
+one recent copy, not a series.
+
+**Nor are the user's own files backed up, and that was decided, not missed.**
+A copy of the files the 348 `uploaded`/`matched` tracks point at (1.8GB --
+`Media.localized/Music` wholesale is 9.0GB, the rest Music's orphans) was kept
+and deleted on 2026-10-17 at the user's call: uploads live in iCloud Music
+Library, `matched` tracks stream Apple's copy, and our imports can be fetched
+again and checked against the fingerprints. It guarded only against iCloud
+itself losing an upload, and it was never read.
 
 Keep the backup **outside** `~/Music`. A few thousand audio files inside the
 media folder invite Music and LaunchServices to index them, which is its own
