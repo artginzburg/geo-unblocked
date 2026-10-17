@@ -720,6 +720,16 @@ Several others demand a channel subscription first (`@deezload2bot`,
 `@Spotify_downloa_bot`) and were not pursued; `@spotify_downloader_bot` never
 answered. Telegram's global search reaches only the account's own chats.
 
+### Behind a bot check, and out of reach for good
+
+Retried 2026-10-17 in the built-in browser, where curl had got 403s: filmot.com
+(titles of deleted YouTube videos) answers with its own captcha, Boomplay and
+Beatport with Cloudflare's "Verify you are human" checkbox, mp3xa.cc with a
+plain 403. An agent does not solve bot checks, so a real browser changes
+nothing here; do not spend another round on them. Yandex Music and Zvuk answer
+451 from Serbia and need a Russian address -- without a subscription that buys
+search and 30s previews, which is a reference, not a file.
+
 ### Soulseek: reachable, and it did not have the last three
 
 Set up 2026-10-17. Soulseek has no sign-up page: an account is created by the
