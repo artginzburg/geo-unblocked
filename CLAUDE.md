@@ -350,6 +350,10 @@ are `.movpkg`, comment empty, `subscription`.
   after fixing the identical bug in `build_index`, in a throwaway snippet
   nobody reviewed.
 
+- **A dead `shared track` takes no writes at all.** Setting `comment` on the
+  `no longer available` entry of `$uicideBoy$ :: N****z` raised -54 "File
+  permission error", twice, on 2026-10-17. Notes about a dead track therefore
+  go in `data/state.json` (`note`), and onto the replacement once there is one.
 - **`date added` is read-only.** `set date added` returns `Unknown object type`
   by every route tried. Not a bug to work around — write it into the comment.
 - **`favorited`, not `loved`.** `loved` raises a descriptor mismatch on current
