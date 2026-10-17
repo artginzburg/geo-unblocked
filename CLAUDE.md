@@ -725,8 +725,14 @@ answered. Telegram's global search reaches only the account's own chats.
 Retried 2026-10-17 in the built-in browser, where curl had got 403s: filmot.com
 (titles of deleted YouTube videos) answers with its own captcha, Boomplay and
 Beatport with Cloudflare's "Verify you are human" checkbox, mp3xa.cc with a
-plain 403. An agent does not solve bot checks, so a real browser changes
-nothing here; do not spend another round on them. Yandex Music and Zvuk answer
+plain 403. An agent does not solve bot checks -- but the user can, once, and then the
+pages read normally: filmot passed in the built-in browser, Boomplay and Beatport
+only in Chromium (Cloudflare never clears in the built-in one), read through
+Claude in Chrome. Searched that way the same day for all three: Boomplay -- no
+Yartie, no `Marked Bills` by him, no Mark Daniel `Can't Do It Like Me` among a
+dozen same-titled songs, no bootleg; Beatport -- electronic only, nothing;
+filmot -- indexes only channels with real view counts, so the obscure uploads
+that matter here are not in it at all. Yandex Music and Zvuk answer
 451 from Serbia and need a Russian address -- without a subscription that buys
 search and 30s previews, which is a reference, not a file.
 
