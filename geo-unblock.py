@@ -465,7 +465,7 @@ end tell'''
 
 # Verified copies of LIVE tracks, kept outside ~/Music so Music and
 # LaunchServices never index them (see "Back the library up").
-ARCHIVE = Path(os.environ.get("GEO_UNBLOCKED_ARCHIVE", "~/MusicArchive")).expanduser()
+ARCHIVE = Path(os.environ.get("GEO_UNBLOCKED_ARCHIVE", "~/Backups/geo-unblocked/archive")).expanduser()
 ARCHIVE_INDEX = ROOT / "data" / "archive.json"
 ARCHIVE_RETRY_DAYS = 14   # a track with no copy found is asked again after this
 

@@ -334,7 +334,7 @@ That installs a launchd job (Sundays at 4:00; `GEO_UNBLOCKED_WEEKDAY` and
 
 Full copies are possible too (`--mirror N`, or `GEO_UNBLOCKED_MIRROR_PER_RUN`
 for the weekly job): each is verified against the preview and kept in
-`~/MusicArchive` (`GEO_UNBLOCKED_ARCHIVE`), and a dead track is then restored
+`~/Backups/geo-unblocked/archive` (`GEO_UNBLOCKED_ARCHIVE`), and a dead track is then restored
 from disk in seconds. It is off by default — for 6,200 tracks it is ~45GB and
 about two days of downloading.
 
@@ -348,29 +348,34 @@ Logs are in `work/logs/`.
 A slice of thirty is repairable by hand; a full pass is not. Both halves matter,
 and the small one matters more:
 
+Everything this project backs up lives in one folder, `~/Backups/geo-unblocked/`:
+
+```
+Music Library <date>.musiclibrary   the library database
+own-files/                          files Apple cannot re-serve
+index/                              old copies of data/list.tsv
+archive/                            --mirror copies, if any
+```
+
 ```bash
 osascript -e 'tell application "Music" to quit'
-ditto ~/Music/Music/"Music Library.musiclibrary" ~/Backups/music-$(date +%F)/"Music Library.musiclibrary"
+ditto ~/Music/Music/"Music Library.musiclibrary" ~/Backups/geo-unblocked/"Music Library $(date +%F).musiclibrary"
 open -a Music
 ```
 
-That is the whole backup. The database holds play counts, playlists, favourites
-and add dates — the part no download restores — and it is about 96MB.
+The database holds play counts, playlists, favourites and add dates — the part
+no download restores — and it is about 170MB. It can only be restored whole,
+which rolls the entire library back to that day, so it is the last resort; one
+recent copy is enough. Day to day, history is restored from `data/list.tsv`.
 
 **Do not copy the whole media folder.** On a subscription the catalogue
-re-downloads from Apple. Measured 2026-10-16: of 6548 tracks, 6193 are
-`subscription` and only 330 are `uploaded` or `matched` — the user's own uploads
-plus this tool's imports. Those live under `Media.localized/Music`, and
-subscription content under `Media.localized/Apple Music` (53GB), so copying just
-the first is the whole job:
-
-```bash
-ditto ~/Music/Music/Media.localized/Music ~/Backups/music-$(date +%F)/own-files
-```
-
-That came to 9.0GB in 11882 files here — far more files than there are library
-rows, because that folder also accumulates orphans Music left behind on earlier
-imports. Copying it is still cheap next to the 53GB that comes back on its own.
+re-downloads from Apple. Measured 2026-10-17: 348 tracks are `uploaded` or
+`matched` — the user's own uploads plus this tool's imports — and their files
+come to 1.8GB. `Media.localized/Music`, where they live, is 9.0GB in 11882
+files, because Music leaves orphans there on every re-import; copying the folder
+blindly is five times larger than the backup. Copy only the files those 348
+tracks point at (walk `file track i` and read `cloud status` and `get location`
+of the same track), keeping their path under `Media.localized/Music`.
 
 Keep the backup outside `~/Music` so Music does not index it.
 
