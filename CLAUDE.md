@@ -55,6 +55,11 @@ instead of what the library *holds*.
   `Track 2.m4a` beside the original. These accumulate and are invisible from the
   library; find them by diffing files on disk against `location` of every file
   track, never by date alone — one file dated the same day was the user's own.
+  **A `.movpkg` is a directory, and its `location` is the package**, so diff
+  packages, not the files inside them: a file-level diff on 2026-10-17 reported
+  11,555 orphans and 7.9GB, of which 27 items and 0.16GB were real -- 25 of our
+  superseded imports (every one carrying our comment) and two `.movpkg`
+  re-downloads left behind by `--dedupe`.
 - **Merged entries are indistinguishable from ours.** After a merge our file
   *is* the user's entry, so deleting "our" tracks in bulk destroys their record.
   This has cost real data twice: one track's 2017 add date and 3 plays, and a
@@ -1344,7 +1349,8 @@ recovered from anywhere once the dead entry is gone.
   yt-dlp requested one **zero** times, because the refusal lands at the
   playability stage, before any token is relevant. PO tokens sign the request
   for format URLs; they cannot answer a demand to sign in. Only cookies can.
-  Plugin at `~/.config/yt-dlp/plugins/`, server at `~/bgutil-ytdlp-pot-provider`.
+  Both were removed on 2026-10-17 once YouTube downloaded without them
+  (verified by a download with the plugin moved aside).
 
 - **JioSaavn's "320" is a tier label, not a promise.** Requesting format 320
   explicitly still returned 98kbps for one track while another from the same
