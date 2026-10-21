@@ -26,3 +26,6 @@ work/
 
 # Spotify app credentials -- the user's own, supplied locally
 data/spotify.json
+
+# Finder metadata
+.DS_Store
