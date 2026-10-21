@@ -629,6 +629,419 @@ def fingerprint(limit, pace=1.5):
     print(f"\n-- слепки: новых {got}, без превью {miss} --")
 
 
+ARTWORK_LOG = ROOT / "data" / "artwork.json"
+ART_PAUSE = 1.0          # between store lookups; Apple 403s a burst
+ART_SAME = 24            # of 256 bits: one cover lands 0-10 apart, two covers 67+; see art_hash
+
+
+def _art_inventory():
+    """Every track's artwork count, in ONE call with its persistent ID and the
+    fields a cover is looked up by -- so the lists cannot drift apart.
+
+    `count of artworks` cannot be bulk-read and walking it per track took 12m47s
+    over 6556 tracks; `artworks of every track` CAN be, and answers a list of
+    lists whose lengths are the counts. Measured 2026-10-21: the two agreed on
+    every one of 6556 tracks, in 34s against 767."""
+    scr = '''
+tell application "Music"
+  set src to library playlist 1
+  set ps to (get persistent ID of every track of src)
+  set cs to (get cloud status of every track of src)
+  set ns to (get name of every track of src)
+  set ars to (get artist of every track of src)
+  set als to (get album of every track of src)
+  set aw to (get artworks of every track of src)
+end tell
+set o to {}
+repeat with i from 1 to (count of ps)
+  set end of o to (item i of ps) & tab & ((item i of cs) as text) & tab & ((count of (item i of aw)) as text) & tab & (item i of ars) & tab & (item i of als) & tab & (item i of ns)
+end repeat
+set AppleScript's text item delimiters to linefeed
+return o as text'''
+    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=900)
+    if r.returncode != 0:
+        raise RuntimeError(f"не удалось прочитать обложки: {r.stderr.strip()[:160]}")
+    out = []
+    for line in r.stdout.split("\n"):
+        p = line.split("\t")
+        if len(p) == 6:
+            out.append({"pid": p[0], "status": p[1], "arts": int(p[2] or 0),
+                        "Artist": p[3], "Album": p[4], "Name": p[5]})
+    if not out:
+        raise RuntimeError("библиотека прочиталась пустой — не похоже на правду")
+    return out
+
+
+def art_hash(path):
+    """A 256-bit difference hash: the centred square shrunk to 17x16 greyscale,
+    one bit per neighbouring pair. ffmpeg decodes, so no imaging library is
+    needed.
+
+    Measured 2026-10-21 against library covers as ground truth. The same cover
+    from Apple's lookup: 0 bits apart on 32 of 32 releases; from Deezer, a
+    different encode at 1000px: 0-10 bits on 20 of 20. Different covers: never
+    under 67 over 1,500 pairs, median 124. The 64-bit version could not be
+    trusted -- two unrelated dark covers came 8 bits apart there."""
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vf",
+                        "crop='min(iw,ih)':'min(iw,ih)',scale=17:16:flags=area,format=gray",
+                        "-frames:v", "1", "-f", "rawvideo", "-"], capture_output=True, timeout=60)
+    px = r.stdout
+    if r.returncode != 0 or len(px) != 272:
+        return None
+    bits = 0
+    for y in range(16):
+        for x in range(16):
+            bits = (bits << 1) | (px[y * 17 + x] > px[y * 17 + x + 1])
+    return bits
+
+
+def art_distance(a, b):
+    return bin(a ^ b).count("1") if a is not None and b is not None else 256
+
+
+def _library_cover(pid, dst):
+    """Raw artwork bytes of a library track, by persistent ID."""
+    r = subprocess.run(["osascript", "-e", f'''
+tell application "Music"
+  set t to (first track of library playlist 1 whose persistent ID is "{pid}")
+  if (count of artworks of t) is 0 then return "0"
+  set d to raw data of artwork 1 of t
+end tell
+set f to open for access (POSIX file "{dst}") with write permission
+set eof f to 0
+write d to f
+close access f
+return "1"'''], capture_output=True, text=True, timeout=120)
+    return r.returncode == 0 and r.stdout.strip() == "1" and Path(dst).stat().st_size > 2000
+
+
+def _ref_album_art(members, album):
+    """The cover of the exact release the fingerprint was taken from.
+
+    `--fingerprint` resolved each live track to a store page -- an Apple album id
+    or a Deezer track id -- after checking artist, title and length against the
+    library row. That page is a far better key than a search: Apple's search
+    stopped returning SALUKI's `BOLSHIE KURTKI` while `lookup?id=6809757560`
+    still answers with it and its cover. The album name is checked too, because
+    the fingerprint did not check it: a single and its album share a song."""
+    import urllib.request
+    idx = _load_refs()
+    for m in members:
+        page = (idx.get(f"{m['Artist']} :: {m['Name']}") or {}).get("page") or ""
+        try:
+            a = re.search(r"music\.apple\.com/(\w\w)/album/[^/]*/(\d+)", page)
+            if a:
+                cc, cid = a.groups()
+                for c in dict.fromkeys([STORE, f"country={cc}", "country=us"]):
+                    res = json.load(urllib.request.urlopen(
+                        f"https://itunes.apple.com/lookup?id={cid}&{c}", timeout=15))["results"]
+                    time.sleep(ART_PAUSE)
+                    if res and close(res[0].get("collectionName", ""), album):
+                        return big(res[0]["artworkUrl100"]), f"apple:{cid}"
+            d = re.search(r"deezer\.com/track/(\d+)", page)
+            if d:
+                x = json.load(urllib.request.urlopen(
+                    f"https://api.deezer.com/track/{d.group(1)}", timeout=15)).get("album") or {}
+                if x.get("cover_xl") and close(x.get("title", ""), album):
+                    return x["cover_xl"], f"deezer:{x.get('id')}"
+        except Exception as ex:
+            print(f"      эталонная страница {page[:60]} не ответила: {str(ex)[:60]}", flush=True)
+    return None, None
+
+
+def same_artist(a, b):
+    """`close()`, or near-identical once both are folded to Latin. Apple
+    romanises Cyrillic artists its own way -- `Skryptonite` -- and folding
+    `Скриптонит` gives `skriptonit`, which shares no token with it. Only used
+    where the album title has already been matched, so the looser test cannot
+    reach a different record on its own."""
+    import difflib
+    if close(a, b):
+        return True
+    fa, fb = " ".join(sorted(tokens(a))), " ".join(sorted(tokens(b)))
+    return bool(fa and fb) and difflib.SequenceMatcher(None, fa, fb).ratio() >= 0.8
+
+
+def _album_bridge(artist, album):
+    """Deezer's album search, and through its barcode, Apple's own copy.
+
+    Apple's search hides releases its `lookup` still serves: SALUKI's
+    `BOLSHIE KURTKI` is missing from search in ge/us/ru/by, and `lookup?upc=`
+    returns it in ge, us and kz. Deezer's album record carries the `upc`, so a
+    Deezer hit verified on artist and album is the bridge to Apple's cover of
+    the same product. Yields (url, label) for Apple first, then Deezer itself."""
+    import urllib.parse, urllib.request
+    hits = []
+    # The album alone as well: a romanised artist in the query can sink a
+    # Cyrillic record (`Skryptonite` finds nothing, the title finds Скриптонит).
+    for q in (f"{artist} {album}", album):
+        try:
+            hits += json.load(urllib.request.urlopen(
+                "https://api.deezer.com/search/album?limit=10&q=" + urllib.parse.quote(q),
+                timeout=15)).get("data", [])
+        except Exception as ex:
+            print(f"      deezer-album: {str(ex)[:60]}", flush=True)
+    for h in hits:
+        if not (same_artist(h.get("artist", {}).get("name", ""), artist) and close(h.get("title", ""), album)):
+            continue
+        try:
+            upc = json.load(urllib.request.urlopen(
+                f"https://api.deezer.com/album/{h['id']}", timeout=15)).get("upc")
+        except Exception:
+            upc = None
+        for c in dict.fromkeys([STORE, "country=us", "country=ru"]) if upc else ():
+            try:
+                res = json.load(urllib.request.urlopen(
+                    f"https://itunes.apple.com/lookup?upc={upc}&{c}", timeout=15))["results"]
+            except Exception:
+                res = []
+            time.sleep(ART_PAUSE)
+            if res and close(res[0].get("collectionName", ""), album):
+                yield big(res[0]["artworkUrl100"]), f"apple-upc:{upc}"
+                break
+        # The placeholder Deezer serves for a missing cover has an empty md5 in
+        # its URL; it is a picture of nothing, and two of them would agree.
+        cov = h.get("cover_xl") or ""
+        if cov and "d41d8cd98f00b204e9800998ecf8427e" not in cov:
+            yield cov, f"deezer-album:{h['id']}"
+        return
+
+
+def ytm_album_art(artist, album):
+    """YouTube Music's album search: label-delivered artwork, served at the
+    original size by `=s0` (3000px measured), no account. It carries releases
+    Apple has dropped, which is what makes it worth asking as a witness."""
+    body = json.dumps({"context": {"client": {"clientName": "WEB_REMIX",
+                                              "clientVersion": "1.20240101.01.00", "hl": "en"}},
+                       "query": f"{artist} {album}",
+                       "params": "EgWKAQIYAWoMEA4QChADEAQQCRAF"})     # filter: albums
+    r = subprocess.run(["curl", "-s", "--max-time", "20", "-X", "POST", "-A", UA_BROWSER,
+                        "-H", "Content-Type: application/json", "-d", body,
+                        "https://music.youtube.com/youtubei/v1/search?prettyPrint=false"],
+                       capture_output=True, text=True, timeout=40)
+    found = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            item = o.get("musicResponsiveListItemRenderer")
+            if item:
+                cols = ["".join(x.get("text", "") for x in
+                                c["musicResponsiveListItemFlexColumnRenderer"]["text"].get("runs", []))
+                        for c in item.get("flexColumns", [])]
+                th = (item.get("thumbnail", {}).get("musicThumbnailRenderer", {})
+                      .get("thumbnail", {}).get("thumbnails", []))
+                if len(cols) >= 2 and th:
+                    found.append((cols[0], cols[1], th[-1]["url"]))
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(jload(r.stdout))
+    for title, sub, url in found:
+        who = sub.split(" • ")[1] if sub.count(" • ") >= 2 else sub
+        if close(title, album) and same_artist(who, artist) and "googleusercontent" in url:
+            return url.split("=")[0] + "=s0"
+    return None
+
+
+def topic_thumb(row):
+    """The thumbnail of the track's YouTube `- Topic` video. Those channels are
+    generated from label deliveries and the picture IS the release's cover --
+    padded to 16:9, which `art_hash` crops away. Low resolution, so it is only
+    ever a witness; measured by the research pass at 0-2 bits (pHash) against
+    the full-size cover, while a different Topic video of the same title read
+    30-38."""
+    for e in search(f"{row['Artist']} {base_title(row['Name'])}", "yt", n=6):
+        # A flat search names a Topic channel without its suffix ("SALUKI"), so
+        # the artist's own channel is accepted too. A music video from it is
+        # harmless here: its frame matches no cover, so it confirms nothing.
+        who = (e.get("channel") or e.get("uploader") or "").removesuffix(" - Topic")
+        if not (norm(e.get("title", "")) == norm(base_title(row["Name"])) and same_artist(who, row["Artist"])):
+            continue
+        if e.get("id"):
+            return f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"
+    return None
+
+
+def _cover_candidates(members, album):
+    """Every independent source's idea of this release's cover, in trust order.
+    Each yields (url, label); the caller downloads, hashes and lets them vote."""
+    row = {**members[0], "Album": album}
+    url, label = _ref_album_art(members, album)
+    if url:
+        yield url, label
+    # Searches by the bare release name: "Kintsugi - Single" is Apple's suffix,
+    # and the other catalogues do not carry it.
+    bare = re.sub(r" - (Single|EP)$", "", album)
+    if album:
+        yield from _album_bridge(row["Artist"], bare)
+        try:
+            u = ytm_album_art(row["Artist"], bare)
+        except Exception as ex:
+            print(f"      ytm: {str(ex)[:60]}", flush=True)
+            u = None
+        if u:
+            yield u, "ytm-album"
+    for fn, label in ((itunes_art, "store"), (deezer_art, "deezer"), (topic_thumb, "yt-topic"),
+                      (genius_art, "genius"),
+                      (spotify_via_search, "spotify-found"), (image_search_art, "image-search")):
+        try:
+            u = fn(row)
+        except Exception as ex:
+            print(f"      {label}: {str(ex)[:60]}", flush=True)
+            u = None
+        if u:
+            yield u, label
+
+
+def _art_family(label):
+    """Which catalogue a cover came from, for counting independent witnesses."""
+    head = label.split(":")[0]
+    return {"apple-upc": "apple", "store": "apple", "library": "apple",
+            "deezer-album": "deezer", "ytm-album": "youtube", "yt-topic": "youtube",
+            "spotify-found": "spotify"}.get(head, head)
+
+
+def _art_by_album(label):
+    """Whether the source matched the release, not only the song."""
+    return label.split(":")[0] in ("library", "apple", "apple-upc", "store",
+                                   "deezer", "deezer-album", "ytm-album")
+
+
+def _write_cover(pid, path):
+    r = subprocess.run(["osascript", "-e", f'set d to read (POSIX file "{path}") as JPEG picture',
+                        "-e", f'''tell application "Music"
+  set t to (first track of library playlist 1 whose persistent ID is "{pid}")
+  if player state is not stopped and persistent ID of current track is "{pid}" then return "playing"
+  set data of artwork 1 of t to d
+  return "1"
+end tell'''], capture_output=True, text=True, timeout=120)
+    return r.stdout.strip() if r.returncode == 0 else f"error {r.stderr.strip()[:80]}"
+
+
+def restore_artwork(apply, limit=None):
+    """Find every track whose cover is gone, and put the right one back.
+
+    Covers vanish without the track dying: on 2026-10-21 353 of 6556 tracks had
+    none, 298 of them playing subscription tracks -- all 18 of SALUKI's
+    `BOLSHIE KURTKI`, whose album Apple had re-delivered. `--refresh-index`
+    cannot see that; it looks at `cloud status` only.
+
+    Per release, the sources are asked in trust order:
+      1. a sibling in the library that still has the cover -- what Apple showed;
+      2. the store page the fingerprint resolved, by id (see `_ref_album_art`);
+      3. the searches `get_art` uses for imports.
+    A cover from (1), or from Apple by release id or barcode, is written as is.
+    Anything else must be confirmed by a second, independent source with a
+    matching hash (`ART_SAME`); a lone
+    search result is reported and left alone, because no cover beats a wrong
+    one. Writes go by persistent ID, never to the playing track, and are read
+    back by a fresh inventory afterwards, not by the write's own echo."""
+    inv = _art_inventory()
+    log = json.loads(ARTWORK_LOG.read_text()) if ARTWORK_LOG.exists() else {}
+    # A dead entry takes no writes (-54), and an empty album groups unrelated songs.
+    bare = [t for t in inv if t["arts"] == 0 and t["status"] != "no longer available"]
+    groups = {}
+    for t in bare:
+        key = (t["Artist"], t["Album"]) if t["Album"] else (t["Artist"], "\0" + t["Name"])
+        groups.setdefault(key, []).append(t)
+    have = {}
+    for t in inv:
+        if t["arts"] and t["Album"]:
+            have.setdefault((t["Artist"], t["Album"]), t["pid"])
+    print(f"без обложки {len(bare)} треков в {len(groups)} релизах"
+          f"{'' if apply else ' (без --apply только смотрю)'}", flush=True)
+
+    work = SCRATCH / "art"
+    work.mkdir(exist_ok=True)
+    plan, unsure = [], []
+    for n, ((artist, album), members) in enumerate(groups.items()):
+        if limit is not None and n >= limit:
+            break
+        album = "" if album.startswith("\0") else album
+        rkey = f"{artist} :: {album or members[0]['Name']}"
+        prev = log.get(rkey) or {}
+        if prev.get("unsure") and time.time() - prev.get("ts", 0) < ARCHIVE_RETRY_DAYS * 86400:
+            continue
+        print(f"[{n}] {artist} — {album or members[0]['Name']} ({len(members)})", flush=True)
+        got, src = None, None
+        sib = have.get((artist, album)) if album else None
+        if sib:
+            p = work / f"{n}-library.img"
+            if _library_cover(sib, p):
+                got, src = p, f"library:{sib}"
+        if not got:
+            seen = []                      # (hash, path, label)
+            for url, label in _cover_candidates(members, album):
+                p = work / f"{n}-{len(seen)}.img"
+                if not fetch_image(url, p):
+                    print(f"      {label}: не скачалось ({url[:60]})", flush=True)
+                    continue
+                h = art_hash(p)
+                if label.startswith(("apple:", "apple-upc:")):
+                    # Apple's own cover for the exact release, by id: what Music
+                    # would draw itself if it still had the link.
+                    got, src = p, label
+                    break
+                # Independent means another catalogue. Deezer's track search
+                # and its album search return the same album object, and on
+                # the first dry run five releases were "confirmed" by Deezer
+                # agreeing with itself.
+                # And when there is an album, one of the two must have checked
+                # it. Genius, Spotify and a Topic video are found by the SONG,
+                # and agree on the song's own release: the first run put the
+                # single "Multiply" on A$AP Rocky's `Absolute`, "23" on Mike
+                # WiLL Made-It's `No Equal, Vol. 3`, and the `No Remorse`
+                # compilation on a 1977 Motörhead broadcast, each confirmed by
+                # two song-level sources.
+                match = next((s for s in seen if art_distance(s[0], h) <= ART_SAME
+                              and _art_family(s[2]) != _art_family(label)
+                              and (not album or _art_by_album(s[2]) or _art_by_album(label))), None)
+                seen.append((h, p, label))
+                if match:
+                    # Two sources that never saw each other picked the same picture.
+                    got, src = match[1], f"{match[2]}={label}"
+                    break
+            if not got:
+                unsure.append(((artist, album), [s[2] for s in seen]))
+                if apply:
+                    # Asked again after two weeks, not every week: a release no
+                    # two sources agree on rarely changes its mind in seven days.
+                    log[rkey] = {"unsure": [s[2] for s in seen] or ["nothing"], "ts": time.time()}
+                print(f"      не подтверждено: {', '.join(s[2] for s in seen) or 'ничего не нашлось'}", flush=True)
+                continue
+        sq = work / f"{n}.jpg"
+        if not squarify(got, sq):
+            print(f"      не читается картинка из {src}", flush=True)
+            continue
+        print(f"      обложка: {src}", flush=True)
+        plan.append((members, sq, src))
+
+    if not apply:
+        print(f"\n-- нашлось для {sum(len(m) for m, _, _ in plan)} треков, "
+              f"не подтверждено {len(unsure)} релизов; --apply запишет --")
+        return
+    wrote = {}
+    for members, sq, src in plan:
+        for m in members:
+            res = _write_cover(m["pid"], sq)
+            if res == "1":
+                wrote[m["pid"]] = src
+            else:
+                print(f"      {m['Artist']} — {m['Name']}: {res}", flush=True)
+    if wrote:
+        time.sleep(60)
+    after = {t["pid"]: t["arts"] for t in _art_inventory()} if wrote else {}
+    held = [p for p in wrote if after.get(p)]
+    for p in held:
+        log[p] = {"src": wrote[p], "at": time.strftime("%Y-%m-%d")}
+    ARTWORK_LOG.write_text(json.dumps(log, ensure_ascii=False, indent=1))
+    lost = len(wrote) - len(held)
+    print(f"\n-- записано {len(wrote)}, держится через минуту {len(held)}"
+          f"{f', ОТКАТИЛОСЬ {lost}' if lost else ''}; не подтверждено {len(unsure)} релизов --")
+
+
 def pick_from_archive(row):
     """A copy archived and verified while the track was alive. Ranked below a
     human-named source and above any search: its audio has already been matched
@@ -3829,6 +4242,9 @@ def main():
                     help="keep a ~60KB preview fingerprint for up to N still-playing tracks")
     ap.add_argument("--mirror", type=int, default=None, metavar="N",
                     help="archive verified copies of up to N still-playing tracks (most-played first)")
+    ap.add_argument("--artwork", type=int, nargs="?", const=-1, default=None, metavar="N",
+                    help="find tracks whose cover is gone and the right one for each (first N releases); "
+                         "with --apply, write it")
     ap.add_argument("--catalog", action="store_true",
                     help="snapshot the WHOLE library (history + persistent IDs) into data/catalog.tsv")
     ap.add_argument("--snapshot", action="store_true",
@@ -3852,7 +4268,8 @@ def main():
     ap.add_argument("--retire-originals", action="store_true",
                     help="delete dead entries whose replacement already carries their history")
     ap.add_argument("--apply", action="store_true",
-                    help="with --dedupe: merge the history and delete the extra rows")
+                    help="with --dedupe: merge the history and delete the extra rows; "
+                         "with --artwork: write the covers found")
     a = ap.parse_args()
 
     # YouTube first: Topic channels carry label-delivered audio. SoundCloud next,
@@ -3870,7 +4287,8 @@ def main():
     # and not touch -- silently rebuilt a playlist the user had just deleted on
     # purpose. A read-only command must leave the library exactly as it found it.
     if not (a.report or a.review or a.approve or a.dedupe or a.retire_originals
-            or a.snapshot or a.catalog or a.mirror is not None or a.fingerprint is not None or a.dry_run or a.audition):
+            or a.snapshot or a.catalog or a.mirror is not None or a.fingerprint is not None or a.artwork is not None
+            or a.dry_run or a.audition):
         ensure_playlists()
     # `--audition` must leave both the library and the record as they were: it
     # exists to be run on a track that is already done, to see what the tool
@@ -3881,6 +4299,9 @@ def main():
     # so it must run before anything insists a track list exists.
     if a.fingerprint is not None:
         fingerprint(a.fingerprint)
+        return
+    if a.artwork is not None:
+        restore_artwork(a.apply, None if a.artwork < 0 else a.artwork)
         return
     if a.mirror is not None:
         mirror(a.mirror, providers, a.min_score)

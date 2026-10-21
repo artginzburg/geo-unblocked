@@ -24,6 +24,9 @@ data/archive.json
 # Download staging; Music copies imports into its own Media folder
 work/
 
+# Which covers were written onto which library tracks, by persistent ID
+data/artwork.json
+
 # Spotify app credentials -- the user's own, supplied locally
 data/spotify.json
 

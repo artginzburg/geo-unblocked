@@ -6,10 +6,12 @@
 #   2. snapshot the whole library while every track is still alive;
 #   3. pick up anything that died since last week;
 #   4. restore it -- from the archive first, the network only for what is not there;
-#   5. keep a ~60KB fingerprint (the release's preview) of every track that
+#   5. put back covers that went missing -- on playing tracks too, which step 3
+#      cannot see (it looks at cloud status only);
+#   6. keep a ~60KB fingerprint (the release's preview) of every track that
 #      still plays and has none yet -- the whole library on the first run
 #      (~7h of quiet requests), only the newly added ones after that;
-#   6. optionally, archive full verified copies too (off unless asked for: ~45GB).
+#   7. optionally, archive full verified copies too (off unless asked for: ~45GB).
 # Every step is safe to rerun; a failed step does not stop the ones after it.
 set -u
 cd "${0:A:h}/.."
@@ -34,6 +36,7 @@ fi
   step --catalog
   step --refresh-index
   step --start 0 --limit 100000
+  step --artwork --apply
   step --fingerprint "${GEO_UNBLOCKED_FINGERPRINTS_PER_RUN:-100000}"
   if (( ${GEO_UNBLOCKED_MIRROR_PER_RUN:-0} > 0 )); then
     step --mirror "$GEO_UNBLOCKED_MIRROR_PER_RUN"

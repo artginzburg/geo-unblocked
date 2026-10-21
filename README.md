@@ -245,6 +245,7 @@ sits behind something the tool does not do, and it says which:
 | another library copy | — | literally the cover Apple was showing |
 | iTunes | artist + album | search by *track*; searching by album misses constantly |
 | Deezer | artist + album | catches compilations and small labels Apple dropped |
+| YouTube Music album search | artist + album | label-delivered art, original size (`=s0`); used by `--artwork` |
 | Genius | artist + title | no album exposed, so a weaker check; adds a gold frame |
 | Spotify | artist + title | needs credentials, see below; skipped without them |
 | Spotify, link discovered | Spotify's own title, via oEmbed | no account needed; limited by search recall |
@@ -311,6 +312,41 @@ down and a few are a step up.
 Opus is occasionally higher-bitrate, but Music cannot play it and transcoding to
 AAC loses more than the bitrate gains.
 
+## Covers that vanish from tracks that still play
+
+A cover can disappear without the track dying. On 2026-10-21, 353 of 6,556
+tracks had none — 298 of them playing subscription tracks, among them all 18 of
+SALUKI's `BOLSHIE KURTKI`, whose album Apple had quietly re-delivered. Nothing
+that watches `cloud status` notices that, so it is a command of its own:
+
+```bash
+python3 geo-unblock.py --artwork            # look: what is missing, what was found, from where
+python3 geo-unblock.py --artwork --apply    # write it
+```
+
+Per release, sources are asked in this order:
+
+| source | trusted alone? | why |
+|---|---|---|
+| a sibling track in the library that still has the cover | yes | it is what Apple was showing |
+| Apple, by the release id the fingerprint recorded | yes | Apple's own cover for that exact release; works when Apple's search no longer returns it |
+| Apple, by barcode taken from Deezer's album record | yes | the same, for releases with no fingerprint yet |
+| Deezer album, YouTube Music album, iTunes search, Deezer track | needs a witness | each checks artist and album |
+| a YouTube Topic thumbnail, Genius, Spotify, image search | needs a witness that checked the album | these find the *song*, and agree on whichever release carries it |
+
+**A witness is a second catalogue whose picture is the same picture**, judged
+by a perceptual hash: the centred square shrunk to 17×16 greyscale, 256 bits.
+Measured against covers already in the library — the same cover from Apple came
+0 bits apart on 32 of 32 releases, from Deezer 0–10 on 20 of 20; different
+covers were never closer than 67 over 1,500 pairs. The bar is 24. Two answers
+from the same catalogue do not count (Deezer's track and album search return one
+object), and a release no two catalogues agree on is left without a cover and
+asked again after two weeks.
+
+Writes go by persistent ID, never to the track that is playing, and are checked
+by re-reading the library a minute later. The weekly job runs `--artwork
+--apply` after the restore step.
+
 ## Staying ahead of the next disappearance
 
 Tracks keep vanishing after the first cleanup — rights for a territory lapse, an
@@ -329,7 +365,8 @@ That installs a launchd job (Sundays at 4:00; `GEO_UNBLOCKED_WEEKDAY` and
 1. snapshots the whole library — history and persistent IDs — into
    `data/catalog.tsv` (`--catalog`);
 2. notices tracks that died since last week and restores them (the usual run);
-3. keeps a **fingerprint** of every live track that has none yet
+3. puts back covers that went missing, on any track (`--artwork --apply`);
+4. keeps a **fingerprint** of every live track that has none yet
    (`--fingerprint N`): the preview, compacted to ~60KB. A whole 6,200-track
    library is ~370MB; the first run does all of it in about seven hours of
    quiet background requests, later runs only the tracks added since. When one of those tracks
@@ -408,6 +445,8 @@ python3 geo-unblock.py --repair                        # patch already-imported 
 | `--dedupe --apply` | merge their history onto the oldest row and delete the rest |
 | `--retire-originals` | list dead entries whose replacement is already in place |
 | `--retire-originals --apply` | lift any history the replacement is missing, then delete them |
+| `--artwork [N]` | list tracks whose cover is gone and the cover found for each (first N releases) |
+| `--artwork --apply` | write those covers, then re-read the library to confirm they held |
 
 The playlists the tool creates are named from `$GEO_UNBLOCKED_NAME`, default
 `Geo-Unblocked`. Set it if that clashes with something you already have.

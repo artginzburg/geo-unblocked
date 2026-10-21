@@ -965,6 +965,75 @@ store `Безумный мир` preview against our verified file reads waveform
 performance from another lineage, most likely the pre-remaster master. A
 re-delivery has to be proven by the audio, not inferred from the catalogue.
 
+## Covers go missing on tracks that never died
+
+The user remembered SALUKI's `BOLSHIE KURTKI` having a cover and asked whether
+it had been geoblocked. It had not: all 18 tracks were `subscription` and
+playing, with `count of artworks` 0. A walk of the whole library on 2026-10-21
+found **353 of 6556** tracks without a cover -- 298 subscription, 52 uploaded,
+3 dead. The mistaken assumption was that `cloud status` is the whole health of
+a track; it says nothing about the cover. `--artwork` exists for this, and the
+weekly job runs it.
+
+What was measured on the way, and is now the code's:
+
+- **`artworks of every track` bulk-reads; `count of artworks` does not.** The
+  former returns a list of lists whose lengths are the counts. It agreed with a
+  per-track walk on all 6556 tracks, in 34s against 12m47s.
+- **A subscription track takes an artwork write, and keeps it.** `set data of
+  artwork 1` on `SALUKI :: BACC` held on rereads 15 minutes and an hour later;
+  the full run wrote 321 and all 321 were there a minute later. A dead
+  (`no longer available`) entry still refuses every write.
+- **Apple's search hides releases its lookup still serves.** `BOLSHIE KURTKI`
+  is absent from `search` in ge/us/ru/by and from SALUKI's 200-result catalogue
+  listing, while `lookup?id=6809757560` returns it with its cover. So the store
+  page `--fingerprint` resolved for each live track (`work/refs/index.json`,
+  `page`) is the best key there is: 214 of the 353 had an Apple album id there,
+  52 a Deezer track id. Where there is none, Deezer's album record carries a
+  `upc`, and `lookup?upc=` reaches Apple's copy the same way.
+- **Deezer's field syntax stopped answering, silently.** `artist:"Queen"
+  track:"One Vision"` returned 0 results and `artist:"SALUKI"` returned "Walking
+  on Sunshine", while `Queen One Vision` found the track first. `deezer_art` and
+  `released_where` used only the field form, so both had been answering "not on
+  Deezer" for everything -- the same shape as every other failure that looks
+  like an absence. Both now also send the plain query; `reference()` already did.
+- **A 64-bit difference hash is too coarse for covers.** Two unrelated dark
+  covers came 8 bits apart. At 256 bits (17x16) the same cover reads 0 (Apple
+  vs library, 32/32) or 0-10 (Deezer vs library, 20/20), and different covers
+  never closer than 67 over 1,500 pairs. `ART_SAME` is 24.
+- **A YouTube thumbnail must be the 16:9 one.** `hqdefault` is 4:3 with the
+  frame letterboxed inside, and its centre square read 89 bits from the cover;
+  `mqdefault` read 3.
+
+Two rules came from wrong covers in the first runs, both caught by looking at a
+contact sheet of every planned cover before trusting the count:
+
+- **A source agreeing with itself is not a witness.** Deezer's track search and
+  its album search return the same album object, and five releases were
+  "confirmed" by it twice. Witnesses are counted by catalogue (`_art_family`).
+- **Song-level sources agree on the song's release, not the library's.** Genius,
+  Spotify and a Topic video are found by title, and two of them put the single
+  `Multiply` on A$AP Rocky's `Absolute`, the single `23` on Mike WiLL Made-It's
+  `No Equal, Vol. 3`, and the `No Remorse` compilation on a 1977 Motörhead radio
+  broadcast. All three were written, then removed by hand (`delete artwork 1`).
+  Now, when the library names an album, one witness must have checked it
+  (`_art_by_album`).
+
+Two things the hash cannot settle, left as they are: a re-delivery can change a
+release's cover (Queen's re-delivered `The Miracle (Deluxe Edition)` now carries
+a collector's-edition sleeve), and Apple's current cover for the release is
+what is written, because it is what Music would draw itself. And one title can
+have two legitimate covers -- the research pass found `Звёзды нас ждут` with the
+1994 CD sleeve on Cover Art Archive, Genius and Discogs and the digital
+remaster's on Deezer, Qobuz and YouTube Music. That is why the Cover Art
+Archive, which holds physical releases, is not a source here.
+
+Not added, and why (measured by the same research pass): Yandex Music answers
+451 from here, Zvuk and Amazon sit behind bot checks, Last.fm and fanart.tv need
+keys, TheAudioDB had neither test album, Discogs serves photos of physical media
+at 600px. Qobuz and Tidal serve 3000px originals without an account and would be
+the next witnesses to add.
+
 ## Verified discovery beats a trusted caption
 
 Spotify covers can be reached with no account: search for the release, take the
