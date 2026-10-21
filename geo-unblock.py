@@ -2292,12 +2292,19 @@ def released_where(row, want):
             # Imperas :: Twin Peaks Theme` with someone else's re-recording.
             if maybe is None:
                 maybe = ("maybe", f"{r['artistName']} — {r['trackName']} :: {link}")
-    q = urllib.parse.quote(f'artist:"{row["Artist"]}" track:"{base_title(row["Name"])}"')
-    try:
-        data = json.load(urllib.request.urlopen(
-            f"https://api.deezer.com/search?q={q}&limit=10", timeout=15)).get("data", [])
-    except Exception:
-        data = []
+    # Both forms, as `reference()` does: Deezer's field syntax answered nothing
+    # at all on 2026-10-21 (`artist:"Queen" track:"One Vision"` -> 0 results,
+    # `artist:"SALUKI"` -> "Walking on Sunshine") while the plain query found the
+    # track first. Every check below verifies the hit, so the loose form is safe.
+    data = []
+    for q in (f'artist:"{row["Artist"]}" track:"{base_title(row["Name"])}"',
+              f'{row["Artist"]} {base_title(row["Name"])}'):
+        try:
+            data += json.load(urllib.request.urlopen(
+                f"https://api.deezer.com/search?q={urllib.parse.quote(q)}&limit=10",
+                timeout=15)).get("data", [])
+        except Exception:
+            pass
     for t in data:
         if fits(t["artist"]["name"], t["title"], t.get("duration", 0)):
             return "deezer", t.get("link")
@@ -2318,11 +2325,14 @@ def deezer_art(row):
     import urllib.parse, urllib.request
     artist, album = row["Artist"], re.sub(r" - (Single|EP)$", "", row.get("Album") or "")
     res = []
-    for title in dict.fromkeys([row["Name"], base_title(row["Name"])]):
-        q = urllib.parse.quote(f'artist:"{artist}" track:"{title}"')
+    # The field syntax alone silently stopped answering (see `released_where`).
+    for q in dict.fromkeys([f'artist:"{artist}" track:"{row["Name"]}"',
+                            f'artist:"{artist}" track:"{base_title(row["Name"])}"',
+                            f'{artist} {row["Name"]}', f'{artist} {base_title(row["Name"])}']):
         try:
             res += json.load(urllib.request.urlopen(
-                f"https://api.deezer.com/search?q={q}&limit=8", timeout=15)).get("data", [])
+                f"https://api.deezer.com/search?q={urllib.parse.quote(q)}&limit=8",
+                timeout=15)).get("data", [])
         except Exception:
             pass
     for x in res:
