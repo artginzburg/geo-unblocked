@@ -941,6 +941,30 @@ killed within the same week.
 kickstart on 2026-10-16: snapshot, catalog (85s), refresh-index and the restore
 walk all completed. The first run triggers macOS's Automation prompt.
 
+**First payoff, 2026-10-21: `Mirazh :: Безумный мир (Remastered 1994)`** died
+alone, days before being noticed. The 1994 remaster (Apple track 6772265370) is
+gone from every storefront tried -- `lookup` answers 0 in `ge`, `us`, `ru`,
+`by`, `kz` -- and search returns only the other recordings (213.8s, 203.0s). So
+no store or archive would have had a reference. The fingerprint did: the weekly
+job had kept Apple's preview of it as a 16kbps Opus while it still played, and
+`--track` with no extra steps found `Мираж - Topic` on YouTube, judged it
+against that fingerprint at waveform **0.92** (background 0.10, inside the
+0.88-0.97 measured for 16kbps above), and imported. Not a merge: a second row,
+`uploaded`, 128k AAC against the original's 256k -- the best that exists
+anywhere reachable, since Soulseek had nothing. Plays (10), skips, the heart and
+the last-played date carried, and held on a reread 20 minutes later. Its
+`state.json` row said `already_live` from an earlier pass; that is harmless,
+because the loop re-probes every row not `ok`.
+
+Checked the same day whether the label had re-delivered the remaster under a
+plain title, as `ZE` was re-delivered: it had re-delivered the catalogue
+(`Назад в будущее`, `Версия 2000`, `История`, all ℗ 2026 НМИ / ДСХХ), but each
+store `Безумный мир` preview against our verified file reads waveform
+0.02-0.03 (envelope 0.57-0.69) -- the song, other recordings. Deezer's
+`Звёзды нас ждут` (228s) reads envelope **0.99**, waveform **0.25**: the same
+performance from another lineage, most likely the pre-remaster master. A
+re-delivery has to be proven by the audio, not inferred from the catalogue.
+
 ## Verified discovery beats a trusted caption
 
 Spotify covers can be reached with no account: search for the release, take the
