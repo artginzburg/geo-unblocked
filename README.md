@@ -96,7 +96,16 @@ worse: it has no `Favorited` column, and the favourite flag has no other backup.
    is rejected, whatever its title says; one that is gets imported even when its
    title or artist would not have passed.
 7. **Finds artwork** through nine sources, each verified before use.
-8. **Imports,** carries the listening history across, and files leftovers into
+8. **Finds lyrics** on LRCLIB, held to the same artist, title and length check
+   as a reference, and writes them into the file. Music shows an imported
+   file's lyrics only from that tag, and only as plain text — Apple's own
+   (synced) lyrics belong to the catalogue entry the track no longer has. An
+   instrumental, or a track LRCLIB does not know, gets none; the run prints
+   which (`текст: lrclib / instrumental / none / error`).
+   Tracks imported before this existed get theirs with
+   `python3 geo-unblock.py --lyrics --apply` (without `--apply` it only looks);
+   the weekly job runs it too.
+9. **Imports,** carries the listening history across, and files leftovers into
    playlists.
 
 Anything neither the rules nor the audio can settle is parked for review rather

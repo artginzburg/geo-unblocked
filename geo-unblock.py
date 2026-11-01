@@ -920,6 +920,107 @@ end tell'''], capture_output=True, text=True, timeout=120)
     return r.stdout.strip() if r.returncode == 0 else f"error {r.stderr.strip()[:80]}"
 
 
+LYRICS_LOG = ROOT / "data" / "lyrics.json"
+
+
+def _lyrics_inventory():
+    """Our imports that have no lyrics, in ONE call, by persistent ID.
+
+    Lyrics and comments both hold line breaks, so neither can travel in a
+    tab-and-linefeed dump: AppleScript reduces each to a flag before printing.
+    Duration is emitted with `div 1` -- truncated like Apple's export, and an
+    integer, so the locale's decimal comma never reaches the parser."""
+    marks = " or ".join(f'c starts with "{m}"' for m in (MARK,) + OLD_MARKS)
+    scr = f'''
+tell application "Music"
+  set src to library playlist 1
+  set ps to (get persistent ID of every track of src)
+  set cs to (get comment of every track of src)
+  set ls to (get lyrics of every track of src)
+  set ds to (get duration of every track of src)
+  set ns to (get name of every track of src)
+  set ars to (get artist of every track of src)
+end tell
+set o to {{}}
+repeat with i from 1 to (count of ps)
+  set c to item i of cs
+  if c is missing value then set c to ""
+  if {marks} then
+    set l to item i of ls
+    if l is missing value or l is "" then
+      set d to item i of ds
+      if d is missing value then set d to 0
+      set end of o to (item i of ps) & tab & ((d div 1) as text) & tab & (item i of ars) & tab & (item i of ns)
+    end if
+  end if
+end repeat
+set AppleScript's text item delimiters to linefeed
+return o as text'''
+    r = subprocess.run(["osascript", "-e", scr], capture_output=True, text=True, timeout=900)
+    if r.returncode != 0:
+        raise RuntimeError(f"не удалось прочитать тексты: {r.stderr.strip()[:160]}")
+    out = []
+    for line in r.stdout.split("\n"):
+        p = line.split("\t")
+        if len(p) == 4:
+            out.append({"pid": p[0], "Time": p[1], "Artist": p[2], "Name": p[3]})
+    return out
+
+
+def _write_lyrics(pid, path):
+    # Read from a file, as UTF-8: lyrics are arbitrary text, and interpolating
+    # them into the script is the unescaped-quote defect `add_to_music` had.
+    r = subprocess.run(["osascript", "-e", f'set x to read (POSIX file "{path}") as «class utf8»',
+                        "-e", f'''tell application "Music"
+  set t to (first track of library playlist 1 whose persistent ID is "{pid}")
+  if player state is not stopped and persistent ID of current track is "{pid}" then return "playing"
+  set lyrics of t to x
+  return "1"
+end tell'''], capture_output=True, text=True, timeout=120)
+    return r.stdout.strip() if r.returncode == 0 else f"error {r.stderr.strip()[:80]}"
+
+
+def restore_lyrics(apply):
+    """Give our earlier imports the lyrics `tag()` did not used to write.
+
+    Only rows carrying our marker: the user's own uploads are his to tag. A
+    `none` or `instrumental` verdict is remembered in `data/lyrics.json` and
+    asked again after `ARCHIVE_RETRY_DAYS`, since LRCLIB is crowd-filled and
+    grows; an `error` is never remembered, so the next run asks again."""
+    todo = _lyrics_inventory()
+    log = json.loads(LYRICS_LOG.read_text()) if LYRICS_LOG.exists() else {}
+    print(f"наших импортов без текста: {len(todo)}"
+          f"{'' if apply else ' (без --apply только смотрю)'}", flush=True)
+    work = SCRATCH / "lyrics"
+    work.mkdir(exist_ok=True)
+    tally = {}
+    for n, t in enumerate(todo):
+        prev = log.get(t["pid"]) or {}
+        if prev and time.time() - prev.get("ts", 0) < ARCHIVE_RETRY_DAYS * 86400:
+            tally["skipped"] = tally.get("skipped", 0) + 1
+            continue
+        text, verdict = find_lyrics(t)
+        print(f"[{n}] {t['Artist']} — {t['Name']}: {verdict}", flush=True)
+        if verdict in ("none", "instrumental"):
+            log[t["pid"]] = {"verdict": verdict, "ts": int(time.time())}
+        elif verdict == "lrclib" and apply:
+            p = work / f"{t['pid']}.txt"
+            p.write_text(text, encoding="utf-8")
+            res = _write_lyrics(t["pid"], p)
+            p.unlink(missing_ok=True)
+            if res != "1":
+                print(f"      не записалось: {res}", flush=True)
+                verdict = "write-failed"
+        tally[verdict] = tally.get(verdict, 0) + 1
+        # LRCLIB is a volunteer service and was answering 503 all day: the
+        # first pass over 253 rows got 119 errors at a 0.5s pace. Back off
+        # after a failure instead of adding to the load that caused it.
+        time.sleep(30 if verdict == "error" else 0.5)
+    if apply:
+        LYRICS_LOG.write_text(json.dumps(log, ensure_ascii=False, indent=1))
+    print("итог:", ", ".join(f"{k} {v}" for k, v in sorted(tally.items())) or "нечего делать")
+
+
 def restore_artwork(apply, limit=None):
     """Find every track whose cover is gone, and put the right one back.
 
@@ -3074,8 +3175,48 @@ def get_art(row, thumb_url, uploader="", trusted_thumb=False, hint=""):
     return None, "none"
 
 
+def find_lyrics(row):
+    """(text, verdict) from LRCLIB, where verdict is `lrclib`, `instrumental`,
+    `none` or `error`.
+
+    Music shows lyrics for an imported file only from the file's own lyrics
+    tag, and only as plain text -- Apple's synced lyrics belong to the catalog
+    entry, which is exactly what a geoblocked track no longer has. So an import
+    without the tag has no lyrics at all, ever, until someone writes them.
+
+    Held to `_ref_fits`, the bar a reference must clear: a search hit of the
+    same title by a different act, or a different edit, is someone else's text.
+    A failed lookup never stops an import -- the audio matters more -- but it is
+    reported as `error`, not `none`, so it reads as "try again", not "has none"."""
+    from urllib.parse import urlencode
+    want = int(float(row.get("Time") or 0))
+    try:
+        _, body = _http("https://lrclib.net/api/search?" + urlencode(
+            {"artist_name": row["Artist"], "track_name": base_title(row["Name"])}), tries=6)
+        hits = json.loads(body or b"[]")
+    except Exception as ex:
+        print(f"      текст: LRCLIB не ответил ({str(ex)[:60]})")
+        return "", "error"
+    fits = [h for h in hits
+            if _ref_fits(row, want, h.get("artistName") or "", h.get("trackName") or "",
+                         h.get("duration"))]
+    if not fits:
+        return "", "none"
+    # A row with text beats one flagged instrumental: LRCLIB is crowd-filled,
+    # and one upload marking a sung track instrumental is not the last word.
+    for h in fits:
+        text = (h.get("plainLyrics") or "").strip()
+        if not text and h.get("syncedLyrics"):
+            text = re.sub(r"^\[[\d:.]+\] ?", "", h["syncedLyrics"], flags=re.M).strip()
+        if text:
+            return text, "lrclib"
+    return "", "instrumental" if any(h.get("instrumental") for h in fits) else "none"
+
+
 def tag(path, row, thumb_url, src_url="", uploader="", trusted_thumb=False, hint=""):
     art, art_src = get_art(row, thumb_url, uploader, trusted_thumb, hint)
+    lyrics, lyr_src = find_lyrics(row)
+    print(f"      текст: {lyr_src}")
     if art is None:
         art = SCRATCH / "__missing__"
 
@@ -3090,7 +3231,7 @@ def tag(path, row, thumb_url, src_url="", uploader="", trusted_thumb=False, hint
     for k, v in [("title", row["Name"]), ("artist", row["Artist"]),
                  ("album", row["Album"]), ("genre", row["Genre"]),
                  ("date", row["Year"]), ("album_artist", row["Artist"]),
-                 ("composer", row.get("Composer")),
+                 ("composer", row.get("Composer")), ("lyrics", lyrics),
                  ("comment", build_comment(row, src_url))]:
         if v:
             cmd += ["-metadata", f"{k}={v}"]
@@ -4245,6 +4386,8 @@ def main():
     ap.add_argument("--artwork", type=int, nargs="?", const=-1, default=None, metavar="N",
                     help="find tracks whose cover is gone and the right one for each (first N releases); "
                          "with --apply, write it")
+    ap.add_argument("--lyrics", action="store_true",
+                    help="find lyrics for our imports that have none; with --apply, write them")
     ap.add_argument("--catalog", action="store_true",
                     help="snapshot the WHOLE library (history + persistent IDs) into data/catalog.tsv")
     ap.add_argument("--snapshot", action="store_true",
@@ -4269,7 +4412,7 @@ def main():
                     help="delete dead entries whose replacement already carries their history")
     ap.add_argument("--apply", action="store_true",
                     help="with --dedupe: merge the history and delete the extra rows; "
-                         "with --artwork: write the covers found")
+                         "with --artwork: write the covers found; with --lyrics: write the lyrics")
     a = ap.parse_args()
 
     # YouTube first: Topic channels carry label-delivered audio. SoundCloud next,
@@ -4287,7 +4430,7 @@ def main():
     # and not touch -- silently rebuilt a playlist the user had just deleted on
     # purpose. A read-only command must leave the library exactly as it found it.
     if not (a.report or a.review or a.approve or a.dedupe or a.retire_originals
-            or a.snapshot or a.catalog or a.mirror is not None or a.fingerprint is not None or a.artwork is not None
+            or a.snapshot or a.catalog or a.mirror is not None or a.fingerprint is not None or a.artwork is not None or a.lyrics
             or a.dry_run or a.audition):
         ensure_playlists()
     # `--audition` must leave both the library and the record as they were: it
@@ -4302,6 +4445,9 @@ def main():
         return
     if a.artwork is not None:
         restore_artwork(a.apply, None if a.artwork < 0 else a.artwork)
+        return
+    if a.lyrics:
+        restore_lyrics(a.apply)
         return
     if a.mirror is not None:
         mirror(a.mirror, providers, a.min_score)

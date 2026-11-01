@@ -1034,6 +1034,59 @@ keys, TheAudioDB had neither test album, Discogs serves photos of physical media
 at 600px. Qobuz and Tidal serve 3000px originals without an account and would be
 the next witnesses to add.
 
+## Lyrics: written by `tag()`, from LRCLIB
+
+Asked 2026-10-31, after `Niko Ne Zna :: Smoked Paprika` was added with none.
+Nothing in the tool had ever looked for lyrics, so every import -- all
+them -- has had none (253 rows carrying our marker on 2026-10-31, 0 with lyrics). The mistaken assumption was that Music supplies them; it
+does for catalogue tracks, and an import is not one.
+
+Measured the same day:
+
+- **Music reads the file's `©lyr` atom on import.** ffmpeg writes it as
+  `-metadata lyrics=…`; a 1s throwaway added with two lines came back from
+  `lyrics of t` intact. Plain text only -- Music has no synced lyrics for files.
+- **LRCLIB answers 503 `ServerOverloaded` often** -- three of the first four
+  calls that day. `_http` with `tries=6` (up to 30s) got through every time
+  after. A failure prints `error`, not `none`: one means try again, the other
+  that there is nothing.
+- `find_lyrics` holds hits to `_ref_fits` (artist token, whole base title,
+  length within `DUR_TOLERANCE`). Checked: Queen `One Vision` and Gin Wigmore
+  `Oh My` found, Hans Zimmer `Time` `instrumental`, Smoked Paprika `none` --
+  absent from LRCLIB, lyrics.ovh and Genius alike; a brass instrumental, by all
+  appearances.
+- Apple's own `hasLyrics` flag was not checked: reading it takes the web
+  player's token, and that was refused as a circumvention. Do not route around it.
+
+**The backfill is `--lyrics [--apply]`**, and the weekly job runs it. It takes
+only rows carrying our marker -- the user's own uploads are his -- and writes
+`lyrics` by persistent ID, never onto the playing track, reading the text from
+a file as UTF-8 rather than interpolating it into the script. Lyrics and
+comments both carry line breaks, so `_lyrics_inventory` reduces them to flags
+inside AppleScript before the tab-separated dump; a raw bulk read would split
+rows. `none`/`instrumental` go in `data/lyrics.json` (gitignored) and are
+re-asked after `ARCHIVE_RETRY_DAYS`; `error` is never recorded.
+
+First run, 2026-10-31, over 253 rows: 105 written (83 + 22 on a retry), 5
+`instrumental`, 57 `none`, 86 still `error` -- LRCLIB went from 503 to 502 on
+every endpoint, `/api/get` included, by the end. Writes held: a recount from
+Music gave 148 without lyrics (253 - 105), and the first row written still had
+its text 15+ minutes later. At a 0.5s pace the first pass drew 119 errors, so a
+failure now waits 30s before the next request.
+
+## Adding a track that was never in the library
+
+The tool is built around index rows, but a plain "add this link" request is
+the same last half of the loop. Done 2026-10-31 for a YouTube `- Topic` upload
+of a track absent from the `ge` store and present in `us`: build a row from the
+`us` iTunes lookup (`Name`, `Artist`, `Album`, `Genre`, `Year`, `Time`, `Track
+Number`, `Track Count`), then `fetch(url, SCRATCH / "<artist> - <title>")`,
+check the delivered length against `Time`, `tag(path, row, <Apple artwork URL
+at 1400x1400>, src_url=url, uploader=…, trusted_thumb=True)`, `add_to_music`,
+and delete the staged file (Music copies it). Read the row back from Music --
+`id` from `add_to_music` is `id`, not `database ID`. Going through `tag()` is
+the point: it is what carries artwork, the comment marker and now lyrics.
+
 ## Verified discovery beats a trusted caption
 
 Spotify covers can be reached with no account: search for the release, take the

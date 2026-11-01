@@ -32,3 +32,6 @@ data/spotify.json
 
 # Finder metadata
 .DS_Store
+
+# Lyrics verdicts (none/instrumental) per library track, by persistent ID
+data/lyrics.json
